@@ -1,6 +1,5 @@
-package al.r1.polytrader.config;
+package al.r1.polytrader.config.binance;
 
-import al.r1.polytrader.config.model.BinanceProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 

@@ -1,37 +1,36 @@
 package al.r1.polytrader.services.binance;
 
 import al.r1.polytrader.services.binance.model.BinanceKline;
-import org.springframework.boot.json.JsonParser;
+import tools.jackson.core.JsonParser;
 import tools.jackson.databind.DeserializationContext;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ValueDeserializer;
 
-import java.io.IOException;
 import java.math.BigDecimal;
 
-public class BinanceKlineDeserializer
-        extends JsonDeserializer<BinanceKline> {
+public class BinanceKlineDeserializer extends ValueDeserializer<BinanceKline> {
 
     @Override
     public BinanceKline deserialize(
             JsonParser parser,
             DeserializationContext context
-    ) throws IOException {
+    ) {
 
-        JsonNode node = parser.getCodec().readTree(parser);
+        JsonNode node = parser.readValueAsTree();
 
         return new BinanceKline(
-                node.get(0).asLong(),
-                new BigDecimal(node.get(1).asText()),
-                new BigDecimal(node.get(2).asText()),
-                new BigDecimal(node.get(3).asText()),
-                new BigDecimal(node.get(4).asText()),
-                new BigDecimal(node.get(5).asText()),
-                node.get(6).asLong(),
-                new BigDecimal(node.get(7).asText()),
-                node.get(8).asLong(),
-                new BigDecimal(node.get(9).asText()),
-                new BigDecimal(node.get(10).asText()),
-                node.get(11).asText()
+                node.get(0).longValue(),
+                new BigDecimal(node.get(1).stringValue()),
+                new BigDecimal(node.get(2).stringValue()),
+                new BigDecimal(node.get(3).stringValue()),
+                new BigDecimal(node.get(4).stringValue()),
+                new BigDecimal(node.get(5).stringValue()),
+                node.get(6).longValue(),
+                new BigDecimal(node.get(7).stringValue()),
+                node.get(8).longValue(),
+                new BigDecimal(node.get(9).stringValue()),
+                new BigDecimal(node.get(10).stringValue()),
+                node.get(11).stringValue()
         );
     }
 }

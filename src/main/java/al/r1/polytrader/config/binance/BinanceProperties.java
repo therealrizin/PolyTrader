@@ -1,4 +1,4 @@
-package al.r1.polytrader.config.model;
+package al.r1.polytrader.config.binance;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 

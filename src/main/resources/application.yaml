@@ -11,6 +11,6 @@ services_wss:
 
 binance:
   base_url: https://api.binance.com
-  wss_url: wss://stream.binance.com:9443
+  wss_url: wss://stream.binance.com:9443/ws/
   api_key: ${BINANCE_API_KEY}
   secret: ${BINANCE_SECRET}

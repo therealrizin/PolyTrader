@@ -56,9 +56,6 @@ public class ProbabilityTable {
         this.numberOfChecksWithWeight = 0;
     }
 
-    /**
-    Change pure - 2% means change pure is 1.02
-     */
     public void updateProbabilitiesTable(int time, double changePure) {
         int changeArea = mapChangeArea(changePure);
         double weight = Math.max((double) numberOfChecks / 1000000, 1);
@@ -78,11 +75,15 @@ public class ProbabilityTable {
     }
 
     public int mapChangeArea(double changePure) {
-        if (changePure == 0) return 0;
-        int change = changePure * 100 - 100;
-        if (changePure > 0) {
-            int x = 30 + (changePure * 10);
-            return Math.min(60, )
+        int change = (int) (changePure * 1000) - 1000;
+        if (change > 0) {
+            int position = 30 + (change);
+            return Math.min(60, position);
+        } else if (change < 0) {
+            int position = 30 - change;
+            return Math.max(1, position);
+        } else {
+            return 0;
         }
     }
 }

@@ -32,10 +32,13 @@ public class BackfillService {
     private void downloadTwoWeeks(String symbol) {
 
         long end = System.currentTimeMillis();
-        long start = end - Duration.ofDays(14).toMillis();
+        //TODO change to 14 days later
+        long start = end - Duration.ofDays(1).toMillis();
 
         long current = start;
         List<BinanceKline> candles = new ArrayList<>();
+
+        log.info("Starting to gather base data from Binance");
 
         while (current < end) {
 
@@ -47,6 +50,7 @@ public class BackfillService {
             candles.addAll(binanceService.getKlines(symbol, current, chunkEnd));
 
             current = chunkEnd + 1;
+            log.info("Gathering data, current: " + current);
         }
 
         updateProbabilityData(candles);

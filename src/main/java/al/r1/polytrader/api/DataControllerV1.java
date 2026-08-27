@@ -17,6 +17,7 @@ import java.util.List;
 public class DataControllerV1 {
 
     private static final int MAX_SECONDS = 300;
+    private static final int CENTER = 50; // index of 0.00% bucket
 
     private final ProbabilityTable probabilityTable;
 
@@ -39,8 +40,13 @@ public class DataControllerV1 {
         List<ProbabilityBucket> buckets = new ArrayList<>();
         for (int b = 0; b < table[seconds].length; b++) {
             double weighted = table[seconds][b];
-            double probability = totalWeight > 0 ? weighted / totalWeight : 0.0;
-            buckets.add(new ProbabilityBucket(bucketLabel(b), weighted, probability));
+            double probabilityPct = totalWeight > 0 ? (weighted / totalWeight) * 100.0 : 0.0;
+
+            buckets.add(new ProbabilityBucket(
+                    bucketLabel(b),
+                    round2(weighted),
+                    round2(probabilityPct) + "%"
+            ));
         }
 
         List<ProbabilityRow> rows = List.of(new ProbabilityRow(seconds, buckets));
@@ -52,11 +58,14 @@ public class DataControllerV1 {
         );
     }
 
+    private double round2(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
     private String bucketLabel(int b) {
-        if (b == 0) return "-3% or more";
-        if (b == 60) return "+3% or more";
-        if (b == 30) return "0%";
-        double pct = (b - 30) * 0.1;
-        return String.format("%+.1f%%", pct);
+        if (b == 0) return "-0.50% or more";
+        if (b == 100) return "+0.50% or more";
+        double pct = (b - CENTER) * 0.01;
+        return String.format("%+.2f%%", pct);
     }
 }

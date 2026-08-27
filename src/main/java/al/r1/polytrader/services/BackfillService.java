@@ -92,6 +92,7 @@ public class BackfillService {
             long currentTime = closeTimes[i];
             int lowerBound = Math.max(0, i - 300);
 
+            probabilityTable.updateNumberOfChecks();
             for (int y = i - 1; y >= lowerBound; y--) {
                 long elapsedSeconds = (currentTime - closeTimes[y]) / 1000;
 
@@ -100,7 +101,7 @@ public class BackfillService {
                 }
 
                 double changePure = currentAvg / avg60[y];
-                probabilityTable.updateProbabilitiesTable((int) elapsedSeconds, changePure);
+                probabilityTable.updateProbabilitiesTable((int) elapsedSeconds, changePure, false);
             }
         }
     }

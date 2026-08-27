@@ -6,42 +6,35 @@ import org.springframework.stereotype.Component;
 @Component
 public class ProbabilityTable {
 
+    private static final int SECONDS_DIM = 301;
+    private static final int BUCKET_RANGE = 50; // ±0.50% in 0.01% steps
+    private static final int CENTER = BUCKET_RANGE; // index of 0.00%
+    private static final int BUCKET_COUNT = BUCKET_RANGE * 2 + 1; // 101 buckets
+
     /**
      * Table representing how often a given price change occurs within a given
-     * amount of time.
+     * amount of time, at 0.01% resolution.
      *
      * Structure:
      *
      * Price change bucket
-     *            -3%   | -2.9% | ...   | 2.9% | 3%+
+     *            -0.50%  | -0.49% | ... | 0.00% | ... | +0.49% | +0.50%
      * --------------------------------
-     * 1s       |  ...  |  ...  |  ...  |
-     * 2s       |  ...  |  ...  |  ...  |
-     * 3s       |  ...  |  ...  |  ...  |
-     * ...      |  ...  |  ...  |  ...  |
-     * 300s     |  ...  |  ...  |  ...  |
+     * 1s       |   ...   |  ...   | ... |  ...  | ... |  ...   |  ...
+     * ...
+     * 300s     |   ...   |  ...   | ... |  ...  | ... |  ...   |  ...
      *
-     * probabilitiesTable[111][30]
-     * - weighted number of occurrences where price changed by 0%
-     * within 111 seconds
+     * Bucket semantics are cumulative toward zero:
+     * - A move of +0.33% increments buckets +0.01% through +0.33% (inclusive).
+     * - A move of -0.49% increments buckets -0.01% through -0.49% (inclusive).
+     * - Index 0 ("-0.50% or more") and index 100 ("+0.50% or more") are
+     *   catch-alls for anything beyond the tracked range.
+     * - Index 50 (0.00%) only increments on an exact-zero change.
      *
+     * probabilitiesTable[time][bucket] = weighted count of occurrences.
      *
-     * probabilitiesTable[22][0]
-     * - weighted number of occurrences where price changed by -3% or more
-     * within 22 seconds
-     *
-     * probabilitiesTable[288][60]
-     * - weighted number of occurrences where price changed by +3% or more
-     * within 288 seconds
-     *
-     * probabilitiesTable[300][35]
-     * - weighted number of occurrences where price changed by +0.5%
-     * within 300 seconds
-     *
-     * The values are doubles because observations are weighted.
-     * Newer observations can receive a higher weight than older observations,
-     * allowing the table to adapt to recent market behavior while still
-     * retaining historical data.
+     * The values are doubles because observations are weighted — newer
+     * observations can receive a higher weight than older ones.
      */
     @Getter
     private double[][] probabilitiesTable;
@@ -49,41 +42,56 @@ public class ProbabilityTable {
     private int numberOfChecks;
     @Getter
     private double numberOfChecksWithWeight;
+    private double weight;
 
     public ProbabilityTable() {
-        this.probabilitiesTable = new double[301][61];
+        this.probabilitiesTable = new double[SECONDS_DIM][BUCKET_COUNT];
         this.numberOfChecks = 0;
         this.numberOfChecksWithWeight = 0;
+        this.weight = 1;
     }
 
-    public void updateProbabilitiesTable(int time, double changePure) {
+    public void updateProbabilitiesTable(int time, double changePure, boolean newRecord) {
         int changeArea = mapChangeArea(changePure);
-        double weight = Math.max((double) numberOfChecks / 1000000, 1);
-        if (changeArea == 30) {
-            probabilitiesTable[time][30] += weight;
-        } else if (changeArea < 30) {
-            for (int i = 0; i < changeArea; i++) {
+
+        if (changeArea > CENTER) {
+            for (int i = CENTER + 1; i <= changeArea; i++) {
+                probabilitiesTable[time][i] += weight;
+            }
+        } else if (changeArea < CENTER) {
+            for (int i = CENTER - 1; i >= changeArea; i--) {
                 probabilitiesTable[time][i] += weight;
             }
         } else {
-            for (int i = 31; i < changeArea; i++) {
-                probabilitiesTable[time][i] += weight;
-            }
+            probabilitiesTable[time][CENTER] += weight;
         }
-        numberOfChecksWithWeight += weight;
-        numberOfChecks++;
+
+        if (newRecord) {
+            updateNumberOfChecks();
+        }
     }
 
+    public void updateNumberOfChecks() {
+        this.weight = Math.max((double) numberOfChecks / 1_000_000, 1);
+        this.numberOfChecksWithWeight += weight;
+        this.numberOfChecks++;
+    }
+
+    /**
+     * Maps a price ratio (e.g. 1.0033 for +0.33%) to a bucket index in
+     * [0, 100], where each step is 0.01% and index 50 is 0.00%.
+     */
     public int mapChangeArea(double changePure) {
-        int change = (int) (changePure * 1000) - 1000;
-        if (change > 0) {
-            int position = 30 + (change);
-            return Math.min(60, position);
-        } else if (change < 0) {
-            int position = 30 - change;
-            return Math.max(1, position);
-        } else {
-            return 0;
-        }
+        int changeUnits = (int) Math.round((changePure - 1) * 10000);
+        if (changeUnits <= -BUCKET_RANGE) return 0;
+        if (changeUnits >= BUCKET_RANGE) return BUCKET_COUNT - 1;
+        return CENTER + changeUnits;
+    }
+
+    public void reset() {
+        this.probabilitiesTable = new double[SECONDS_DIM][BUCKET_COUNT];
+        this.numberOfChecks = 0;
+        this.numberOfChecksWithWeight = 0;
+        this.weight = 1;
     }
 }

@@ -1,7 +1,7 @@
 package al.r1.polytrader.services.binance;
 
 import al.r1.polytrader.config.binance.BinanceProperties;
-import al.r1.polytrader.services.CurrencyPairs;
+import al.r1.polytrader.services.model.CurrencyPairs;
 import al.r1.polytrader.services.binance.model.BinanceKline;
 import al.r1.polytrader.services.binance.model.BinanceTradeEvent;
 import jakarta.annotation.PostConstruct;
@@ -39,7 +39,7 @@ public class BinanceService {
         this.webClient = webClient;
         this.objectMapper = objectMapper;
         this.binanceProperties = binanceProperties;
-        this.latestPrice = new HashMap<>();
+        this.latestPrice = new HashMap<CurrencyPairs, BigDecimal>();
     }
 
     @PostConstruct
@@ -62,7 +62,7 @@ public class BinanceService {
                             BinanceTradeEvent event = objectMapper.readValue(message.getPayload(),
                                     BinanceTradeEvent.class);
 
-                            latestPrice.put(symbol, new BigDecimal(event.p()));
+                            latestPrice.put(CurrencyPairs.getUsdXValue(symbol), new BigDecimal(event.p()));
 
                         } catch (Exception e) {
                             log.error(

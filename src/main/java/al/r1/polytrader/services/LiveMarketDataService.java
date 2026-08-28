@@ -2,7 +2,9 @@ package al.r1.polytrader.services;
 
 import al.r1.polytrader.engine.ProbabilityTable;
 import al.r1.polytrader.services.binance.BinanceService;
-import al.r1.polytrader.services.binance.model.BinanceKline;
+import al.r1.polytrader.services.model.CurrencyPairs;
+import al.r1.polytrader.services.model.Prices;
+import al.r1.polytrader.services.polymarket.PolymarketService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.TaskScheduler;
@@ -18,6 +20,7 @@ import java.util.concurrent.atomic.AtomicReference;
 @RequiredArgsConstructor
 public class LiveMarketDataService {
 
+    private final Prices globalPrices;
     private final TaskScheduler liveDataTaskScheduler;
     private final BinanceService binanceService;
     private final PolymarketService polymarketService;
@@ -48,8 +51,8 @@ public class LiveMarketDataService {
 
     private void tick() {
         try {
-
-            //TODO LOGIC HERE
+            globalPrices.setBinancePrice(binanceService.getLatestPrice().get(CurrencyPairs.BTCUSD));
+            //TODO update table of prices
 
         } catch (Exception e) {
             log.error("Error during live data tick", e);

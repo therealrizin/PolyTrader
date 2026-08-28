@@ -3,6 +3,7 @@ package al.r1.polytrader.services;
 import al.r1.polytrader.engine.ProbabilityTable;
 import al.r1.polytrader.services.binance.BinanceService;
 import al.r1.polytrader.services.binance.model.BinanceKline;
+import al.r1.polytrader.services.model.CurrencyPairs;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -33,7 +34,7 @@ public class BackfillService {
 
         long end = System.currentTimeMillis();
         //TODO change to 14 days later
-        long start = end - Duration.ofDays(1).toMillis();
+        long start = end - Duration.ofHours(1).toMillis();
 
         long current = start;
         List<BinanceKline> candles = new ArrayList<>();

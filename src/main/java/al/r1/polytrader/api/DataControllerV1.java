@@ -1,9 +1,11 @@
 package al.r1.polytrader.api;
 
+import al.r1.polytrader.api.model.PricesResponse;
 import al.r1.polytrader.api.model.ProbabilityBucket;
 import al.r1.polytrader.api.model.ProbabilityRow;
 import al.r1.polytrader.api.model.ProbabilityTableResponse;
 import al.r1.polytrader.engine.ProbabilityTable;
+import al.r1.polytrader.services.model.Prices;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -17,12 +19,14 @@ import java.util.List;
 public class DataControllerV1 {
 
     private static final int MAX_SECONDS = 300;
-    private static final int CENTER = 50; // index of 0.00% bucket
+    private static final int CENTER = 500; // index of 0.000% bucket
 
     private final ProbabilityTable probabilityTable;
+    private final Prices prices;
 
-    public DataControllerV1(ProbabilityTable probabilityTable) {
+    public DataControllerV1(ProbabilityTable probabilityTable, Prices prices) {
         this.probabilityTable = probabilityTable;
+        this.prices = prices;
     }
 
     @GetMapping("/table")
@@ -58,14 +62,19 @@ public class DataControllerV1 {
         );
     }
 
+    @GetMapping("/prices")
+    public PricesResponse PricesResponse() {
+        return PricesResponse.gatherPrices(prices);
+    }
+
     private double round2(double value) {
         return Math.round(value * 100.0) / 100.0;
     }
 
     private String bucketLabel(int b) {
-        if (b == 0) return "-0.50% or more";
-        if (b == 100) return "+0.50% or more";
-        double pct = (b - CENTER) * 0.01;
-        return String.format("%+.2f%%", pct);
+        if (b == 0) return "-0.500% or more";
+        if (b == 1000) return "+0.500% or more";
+        double pct = (b - CENTER) * 0.001;
+        return String.format("%+.3f%%", pct);
     }
 }

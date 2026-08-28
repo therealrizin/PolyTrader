@@ -7,29 +7,29 @@ import org.springframework.stereotype.Component;
 public class ProbabilityTable {
 
     private static final int SECONDS_DIM = 301;
-    private static final int BUCKET_RANGE = 50; // ±0.50% in 0.01% steps
-    private static final int CENTER = BUCKET_RANGE; // index of 0.00%
-    private static final int BUCKET_COUNT = BUCKET_RANGE * 2 + 1; // 101 buckets
+    private static final int BUCKET_RANGE = 500;   // ±0.50% in 0.001% steps
+    private static final int CENTER = BUCKET_RANGE;
+    private static final int BUCKET_COUNT = 2 * BUCKET_RANGE + 1; // 1001 buckets
 
     /**
      * Table representing how often a given price change occurs within a given
-     * amount of time, at 0.01% resolution.
+     * amount of time, at 0.001% resolution.
      *
      * Structure:
      *
      * Price change bucket
-     *            -0.50%  | -0.49% | ... | 0.00% | ... | +0.49% | +0.50%
+     *            -0.500% | -0.499% | ... | 0.000% | ... | +0.499% | +0.500%
      * --------------------------------
      * 1s       |   ...   |  ...   | ... |  ...  | ... |  ...   |  ...
      * ...
      * 300s     |   ...   |  ...   | ... |  ...  | ... |  ...   |  ...
      *
      * Bucket semantics are cumulative toward zero:
-     * - A move of +0.33% increments buckets +0.01% through +0.33% (inclusive).
-     * - A move of -0.49% increments buckets -0.01% through -0.49% (inclusive).
-     * - Index 0 ("-0.50% or more") and index 100 ("+0.50% or more") are
+     * - A move of +0.333% increments buckets +0.001% through +0.333% (inclusive).
+     * - A move of -0.499% increments buckets -0.001% through -0.499% (inclusive).
+     * - Index 0 ("-0.500% or more") and index 1000 ("+0.500% or more") are
      *   catch-alls for anything beyond the tracked range.
-     * - Index 50 (0.00%) only increments on an exact-zero change.
+     * - Index 500 (0.000%) only increments on an exact-zero change.
      *
      * probabilitiesTable[time][bucket] = weighted count of occurrences.
      *
@@ -78,11 +78,11 @@ public class ProbabilityTable {
     }
 
     /**
-     * Maps a price ratio (e.g. 1.0033 for +0.33%) to a bucket index in
-     * [0, 100], where each step is 0.01% and index 50 is 0.00%.
+     * Maps a price ratio (e.g. 1.00333 for +0.333%) to a bucket index in
+     * [0, 1000], where each step is 0.001% and index 500 is 0.000%.
      */
     public int mapChangeArea(double changePure) {
-        int changeUnits = (int) Math.round((changePure - 1) * 10000);
+        int changeUnits = (int) Math.round((changePure - 1) * 100000);
         if (changeUnits <= -BUCKET_RANGE) return 0;
         if (changeUnits >= BUCKET_RANGE) return BUCKET_COUNT - 1;
         return CENTER + changeUnits;

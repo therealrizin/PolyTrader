@@ -3,7 +3,6 @@ spring:
     name: PolyTrader
 
 services_wss:
-  polymarket: wss://ws-subscriptions-clob.polymarket.com/ws/
   coinbase: wss://ws-feed.exchange.coinbase.com
   kraken: wss://ws.kraken.com
   bybit: wss://stream.bybit.com/v5/public/spot
@@ -14,3 +13,8 @@ binance:
   wss_url: wss://stream.binance.com:9443/ws/
   api_key: ${BINANCE_API_KEY}
   secret: ${BINANCE_SECRET}
+
+polymarket:
+  wss_market_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
+  gamma_base_url: https://gamma-api.polymarket.com
+  market_refresh_seconds: 30

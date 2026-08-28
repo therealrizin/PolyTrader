@@ -5,8 +5,7 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
-import java.util.ArrayDeque;
-import java.util.Queue;
+import java.util.*;
 
 @Getter
 @Component
@@ -21,7 +20,8 @@ public class Prices {
     private int active60sAvgProviders = 0;
 
     // Polymarket specific (not part of averages)
-    private BigDecimal polymarket60sAvgPrice;
+    private BigDecimal polymarketPrice;
+    private final Deque<PolymarketSample> polymarketRecentHistory = new ArrayDeque<>();
 
     // Binance
     private BigDecimal binancePrice;
@@ -61,8 +61,25 @@ public class Prices {
     // ------------------------------------------------------------------------
     // Polymarket
     // ------------------------------------------------------------------------
-    public synchronized void setPolymarket60sAvgPrice(BigDecimal polymarket60sAvgPrice) {
-        this.polymarket60sAvgPrice = polymarket60sAvgPrice;
+
+    public synchronized void setPolymarketPrice(BigDecimal polymarketPrice) {
+        this.polymarketPrice = polymarketPrice;
+    }
+
+    /**
+     * Records one price snapshot per live-data tick. Keeping a count rather
+     * than a time cutoff guarantees that the API exposes exactly the latest
+     * ten one-second samples once the service has warmed up.
+     */
+    public synchronized void recordPriceSnapshot(long timestampMillis) {
+        polymarketRecentHistory.addLast(new PolymarketSample(timestampMillis, polymarketPrice, avgPrice));
+        while (polymarketRecentHistory.size() > 10) {
+            polymarketRecentHistory.pollFirst();
+        }
+    }
+
+    public synchronized List<PolymarketSample> getPolymarketRecentHistory() {
+        return new ArrayList<>(polymarketRecentHistory);
     }
 
     // ------------------------------------------------------------------------

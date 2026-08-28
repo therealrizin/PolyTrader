@@ -10,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.ScheduledFuture;
@@ -28,7 +29,6 @@ public class LiveMarketDataService {
     private final TradingDecisionService tradingDecisionService;
 
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
-
     private final RollingPriceWindow rollingWindow = new RollingPriceWindow();
 
     public void start() {
@@ -38,6 +38,7 @@ public class LiveMarketDataService {
                 Duration.ofSeconds(1)
         );
         scheduledTask.set(future);
+        polymarketService.start();
         log.info("Live market data collection started");
     }
 
@@ -47,13 +48,18 @@ public class LiveMarketDataService {
             future.cancel(false);
             log.info("Live market data collection stopped");
         }
+        polymarketService.stop();
     }
 
     private void tick() {
         try {
-            globalPrices.setBinancePrice(binanceService.getLatestPrice().get(CurrencyPairs.BTCUSD));
-            //TODO update table of prices
-
+            BigDecimal latest = binanceService.getLatestPrice().get(CurrencyPairs.BTCUSD);
+            long timestampMillis = System.currentTimeMillis();
+            if (latest != null) {
+                globalPrices.setBinancePrice(latest);
+                rollingWindow.addAndUpdateTable(timestampMillis, latest.doubleValue(), probabilityTable);
+            }
+            globalPrices.recordPriceSnapshot(timestampMillis);
         } catch (Exception e) {
             log.error("Error during live data tick", e);
         }

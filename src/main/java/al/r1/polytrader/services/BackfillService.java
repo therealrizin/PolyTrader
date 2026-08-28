@@ -27,7 +27,9 @@ public class BackfillService {
     }
 
     public void gatherAndAnalyze() {
-        downloadTwoWeeks(CurrencyPairs.BTCUSD.getValue());
+        // Match the liquid stream used by BinanceService. CurrencyPairs maps
+        // BTCUSDT to the application-level BTCUSD price series.
+        downloadTwoWeeks(CurrencyPairs.BTCUSDT.getValue());
     }
 
     private void downloadTwoWeeks(String symbol) {

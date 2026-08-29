@@ -1,6 +1,8 @@
 package al.r1.polytrader.services;
 
 import al.r1.polytrader.services.binance.BinanceService;
+import al.r1.polytrader.services.coinbase.CoinbaseService;
+import al.r1.polytrader.services.kraken.KrakenService;
 import al.r1.polytrader.services.model.CurrencyPairs;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.PolymarketService;
@@ -23,6 +25,8 @@ public class LiveMarketDataService {
     private final Prices globalPrices;
     private final TaskScheduler liveDataTaskScheduler;
     private final BinanceService binanceService;
+    private final KrakenService krakenService;
+    private final CoinbaseService coinbaseService;
     private final PolymarketService polymarketService;
     private final TradingDecisionService tradingDecisionService;
 
@@ -50,21 +54,28 @@ public class LiveMarketDataService {
 
     /**
      * Runs every 1s to keep Prices (and the API's last-10s snapshot list)
-     * current. This does NOT drive ProbabilityTable anymore — live table
-     * updates come from PolymarketTwapClient, keyed on Chainlink's own
-     * observation timestamps, not this tick's cadence. Note: Polymarket's
-     * RTDS push is not guaranteed to arrive every second (the 60s window
-     * is a lookback size, not a publish cadence, per Polymarket's docs) —
-     * this tick just samples whatever the latest known values are.
+     * current. This does NOT drive ProbabilityTable — live table updates
+     * come from PolymarketTwapClient, keyed on Chainlink's own observation
+     * timestamps, not this tick's cadence.
      */
     private void tick() {
         try {
-            BigDecimal latest = binanceService.getLatestPrice().get(CurrencyPairs.BTCUSD);
-            long timestampMillis = System.currentTimeMillis();
-            if (latest != null) {
-                globalPrices.setBinancePrice(latest);
+            BigDecimal binanceLatest = binanceService.getLatestPrice().get(CurrencyPairs.BTCUSD);
+            if (binanceLatest != null) {
+                globalPrices.setBinancePrice(binanceLatest);
             }
-            globalPrices.recordPriceSnapshot(timestampMillis);
+
+            BigDecimal krakenLatest = krakenService.getLatestPrice().get(CurrencyPairs.BTCUSD);
+            if (krakenLatest != null) {
+                globalPrices.setKrakenPrice(krakenLatest);
+            }
+
+            BigDecimal coinbaseLatest = coinbaseService.getLatestPrice().get(CurrencyPairs.BTCUSD);
+            if (coinbaseLatest != null) {
+                globalPrices.setCoinbasePrice(coinbaseLatest);
+            }
+
+            globalPrices.recordPriceSnapshot(System.currentTimeMillis());
         } catch (Exception e) {
             log.error("Error during live data tick", e);
         }

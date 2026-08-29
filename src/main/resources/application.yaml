@@ -15,6 +15,4 @@ binance:
   secret: ${BINANCE_SECRET}
 
 polymarket:
-  wss_market_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
-  gamma_base_url: https://gamma-api.polymarket.com
-  market_refresh_seconds: 30
+  wss_live_data_url: wss://ws-live-data.polymarket.com

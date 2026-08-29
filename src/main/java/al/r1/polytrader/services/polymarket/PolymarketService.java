@@ -7,13 +7,13 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class PolymarketService {
 
-    private final PolymarketWebSocketClient polymarketWebSocketClient;
+    private final PolymarketTwapClient twapClient;
 
     public void start() {
-        polymarketWebSocketClient.start();
+        twapClient.start();
     }
 
     public void stop() {
-        polymarketWebSocketClient.stop();
+        twapClient.stop();
     }
 }

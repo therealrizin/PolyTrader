@@ -52,8 +52,6 @@ public class BinanceService {
 
     @PostConstruct
     public void start() {
-        // BTCUSD has very sparse trade activity on Binance. BTCUSDT is the
-        // liquid spot stream and is normalized to the BTCUSD application key.
         connectPriceStream(CurrencyPairs.BTCUSDT);
     }
 

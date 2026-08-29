@@ -1,6 +1,5 @@
 package al.r1.polytrader.services;
 
-import al.r1.polytrader.engine.ProbabilityTable;
 import al.r1.polytrader.services.binance.BinanceService;
 import al.r1.polytrader.services.model.CurrencyPairs;
 import al.r1.polytrader.services.model.Prices;
@@ -25,11 +24,9 @@ public class LiveMarketDataService {
     private final TaskScheduler liveDataTaskScheduler;
     private final BinanceService binanceService;
     private final PolymarketService polymarketService;
-    private final ProbabilityTable probabilityTable;
     private final TradingDecisionService tradingDecisionService;
 
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
-    private final RollingPriceWindow rollingWindow = new RollingPriceWindow();
 
     public void start() {
         ScheduledFuture<?> future = liveDataTaskScheduler.scheduleAtFixedRate(
@@ -51,13 +48,21 @@ public class LiveMarketDataService {
         polymarketService.stop();
     }
 
+    /**
+     * Runs every 1s to keep Prices (and the API's last-10s snapshot list)
+     * current. This does NOT drive ProbabilityTable anymore — live table
+     * updates come from PolymarketTwapClient, keyed on Chainlink's own
+     * observation timestamps, not this tick's cadence. Note: Polymarket's
+     * RTDS push is not guaranteed to arrive every second (the 60s window
+     * is a lookback size, not a publish cadence, per Polymarket's docs) —
+     * this tick just samples whatever the latest known values are.
+     */
     private void tick() {
         try {
             BigDecimal latest = binanceService.getLatestPrice().get(CurrencyPairs.BTCUSD);
             long timestampMillis = System.currentTimeMillis();
             if (latest != null) {
                 globalPrices.setBinancePrice(latest);
-                rollingWindow.addAndUpdateTable(timestampMillis, latest.doubleValue(), probabilityTable);
             }
             globalPrices.recordPriceSnapshot(timestampMillis);
         } catch (Exception e) {

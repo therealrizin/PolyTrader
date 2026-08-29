@@ -26,12 +26,22 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
 public class BinanceService {
 
     private static final Duration RECONNECT_DELAY = Duration.ofSeconds(5);
+
+    // BTCUSDT trades multiple times per second on Binance in normal
+    // conditions. If we go this long with no message on an ostensibly-open
+    // session, treat it as dead rather than trust the transport-level
+    // callbacks, which don't always fire for a half-open socket or a
+    // client that's been silently torn down by the underlying JSR-356
+    // implementation.
+    private static final Duration STALE_THRESHOLD = Duration.ofSeconds(10);
+    private static final Duration STALENESS_CHECK_INTERVAL = Duration.ofSeconds(3);
 
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
@@ -40,6 +50,18 @@ public class BinanceService {
 
     @Getter
     private final Map<CurrencyPairs, BigDecimal> latestPrice = new ConcurrentHashMap<>();
+
+    private final Map<CurrencyPairs, Long> lastMessageAtMillis = new ConcurrentHashMap<>();
+    private final Map<CurrencyPairs, AtomicReference<WebSocketSession>> sessions = new ConcurrentHashMap<>();
+
+    // IMPORTANT: the JSR-356 client implementation backing
+    // StandardWebSocketClient (Tyrus) can tear a connection down without
+    // firing afterConnectionClosed/handleTransportError if nothing holds a
+    // strong reference to the WebSocketClient itself for the life of the
+    // connection. Previously this was a local variable in
+    // connectPriceStream() and became eligible for GC as soon as the method
+    // returned — keeping it here fixes silent, un-notified disconnects.
+    private final Map<CurrencyPairs, WebSocketClient> clients = new ConcurrentHashMap<>();
 
     public BinanceService(@Qualifier("binanceWebClient") WebClient webClient, ObjectMapper objectMapper,
                           BinanceProperties binanceProperties,
@@ -53,16 +75,21 @@ public class BinanceService {
     @PostConstruct
     public void start() {
         connectPriceStream(CurrencyPairs.BTCUSDT);
+        liveDataTaskScheduler.scheduleAtFixedRate(this::checkStaleness, STALENESS_CHECK_INTERVAL);
     }
 
     public void connectPriceStream(CurrencyPairs symbol) {
         WebSocketClient client = new StandardWebSocketClient();
+        clients.put(symbol, client); // hold a strong reference for the connection's lifetime
+
         String url = binanceProperties.wssUrl() + symbol.getValue().toLowerCase() + "@trade";
 
         client.execute(new TextWebSocketHandler() {
 
             @Override
             public void afterConnectionEstablished(WebSocketSession session) {
+                sessions.computeIfAbsent(symbol, s -> new AtomicReference<>()).set(session);
+                lastMessageAtMillis.put(symbol, System.currentTimeMillis());
                 log.info("Connected to Binance trade stream for {}", symbol.getValue());
             }
 
@@ -70,24 +97,63 @@ public class BinanceService {
             protected void handleTextMessage(WebSocketSession session, TextMessage message) {
                 try {
                     BinanceTradeEvent event = objectMapper.readValue(message.getPayload(), BinanceTradeEvent.class);
-                    latestPrice.put(CurrencyPairs.getUsdXValue(symbol), new BigDecimal(event.p()));
+                    BigDecimal price = new BigDecimal(event.p());
+                    latestPrice.put(CurrencyPairs.getUsdXValue(symbol), price);
+                    lastMessageAtMillis.put(symbol, System.currentTimeMillis());
+                    log.debug("Binance trade {} price={} tradeId={}", symbol.getValue(), price, event.t());
                 } catch (Exception e) {
-                    log.error("Failed to process Binance message", e);
+                    log.error("Failed to process Binance message for {}: {}", symbol.getValue(), message.getPayload(), e);
                 }
             }
 
             @Override
             public void handleTransportError(WebSocketSession session, Throwable exception) {
                 log.warn("Binance websocket transport error for {}, reconnecting", symbol.getValue(), exception);
+                sessions.computeIfAbsent(symbol, s -> new AtomicReference<>()).compareAndSet(session, null);
                 scheduleReconnect(symbol);
             }
 
             @Override
             public void afterConnectionClosed(WebSocketSession session, CloseStatus closeStatus) {
                 log.warn("Binance websocket closed for {} ({}), reconnecting", symbol.getValue(), closeStatus);
+                sessions.computeIfAbsent(symbol, s -> new AtomicReference<>()).compareAndSet(session, null);
                 scheduleReconnect(symbol);
             }
         }, url);
+    }
+
+    /**
+     * Backstop for disconnects that the transport callbacks above don't
+     * catch. Since BTCUSDT trades continuously, silence beyond
+     * STALE_THRESHOLD on a pair we're actively subscribed to is itself the
+     * failure signal.
+     */
+    private void checkStaleness() {
+        long now = System.currentTimeMillis();
+        for (CurrencyPairs symbol : lastMessageAtMillis.keySet()) {
+            Long last = lastMessageAtMillis.get(symbol);
+            if (last == null) continue;
+
+            long silentFor = now - last;
+            if (silentFor > STALE_THRESHOLD.toMillis()) {
+                log.warn("No Binance trade messages for {} in {}ms, forcing reconnect", symbol.getValue(), silentFor);
+
+                AtomicReference<WebSocketSession> ref = sessions.get(symbol);
+                WebSocketSession session = (ref != null) ? ref.getAndSet(null) : null;
+                if (session != null && session.isOpen()) {
+                    try {
+                        session.close(CloseStatus.GOING_AWAY);
+                    } catch (Exception e) {
+                        log.warn("Failed to close stale Binance session for {}", symbol.getValue(), e);
+                    }
+                }
+
+                // Prevent this check from re-firing every few seconds while
+                // the reconnect is in flight; afterConnectionEstablished resets it.
+                lastMessageAtMillis.put(symbol, now);
+                connectPriceStream(symbol);
+            }
+        }
     }
 
     private void scheduleReconnect(CurrencyPairs symbol) {

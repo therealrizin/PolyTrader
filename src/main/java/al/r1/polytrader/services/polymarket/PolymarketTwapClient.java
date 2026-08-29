@@ -1,9 +1,8 @@
 package al.r1.polytrader.services.polymarket;
 
 import al.r1.polytrader.config.polymarket.PolymarketProperties;
+import al.r1.polytrader.engine.ProbabilityTable;
 import al.r1.polytrader.services.model.Prices;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.TaskScheduler;
@@ -14,8 +13,11 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.client.WebSocketClient;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -25,6 +27,11 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Consumes Chainlink 60s TWAP prices for BTC/USD via Polymarket RTDS.
  * Uses the configured wss_live_data_url from application.yaml.
+ *
+ * This is now the *live* driver of ProbabilityTable. BackfillService seeds
+ * the table once from Binance history at startup; from then on, table
+ * updates come only from this class, so the histogram isn't a blend of two
+ * differently-computed 60s-average methodologies.
  */
 @Slf4j
 @Service
@@ -32,21 +39,26 @@ public class PolymarketTwapClient {
 
     private static final Duration PING_INTERVAL = Duration.ofSeconds(5);  // required by RTDS
     private static final Duration RECONNECT_DELAY = Duration.ofSeconds(5);
+    private static final BigInteger E18 = BigInteger.TEN.pow(18);
 
     private final PolymarketProperties properties;
     private final Prices prices;
+    private final ProbabilityTable probabilityTable;
     private final ObjectMapper objectMapper;
     private final TaskScheduler taskScheduler;
 
     private final AtomicReference<WebSocketSession> currentSession = new AtomicReference<>();
+    private final PolymarketRollingWindow rollingWindow = new PolymarketRollingWindow();
     private volatile boolean running = false;
 
     public PolymarketTwapClient(PolymarketProperties properties,
                                 Prices prices,
+                                ProbabilityTable probabilityTable,
                                 ObjectMapper objectMapper,
                                 TaskScheduler liveDataTaskScheduler) {
         this.properties = properties;
         this.prices = prices;
+        this.probabilityTable = probabilityTable;
         this.objectMapper = objectMapper;
         this.taskScheduler = liveDataTaskScheduler;
     }
@@ -144,18 +156,61 @@ public class PolymarketTwapClient {
     private void onTwapUpdate(JsonNode node) {
         JsonNode topicNode = node.get("topic");
         if (topicNode == null) return;
-        if (!"crypto_prices_twap_sixty".equals(topicNode.asText())) return;
+        if (!"crypto_prices_twap_sixty".equals(topicNode.stringValue())) return;
 
         JsonNode payload = node.get("payload");
         if (payload == null) return;
 
-        JsonNode valueNode = payload.get("value");
-        if (valueNode == null) return;
+        // filters= already restricts the subscription to btc/usd, but guard
+        // anyway in case a future change omits filters to multiplex symbols.
+        JsonNode symbolNode = payload.get("symbol");
+        if (symbolNode != null && !"btc/usd".equalsIgnoreCase(symbolNode.stringValue())) return;
 
-        BigDecimal twapPrice = new BigDecimal(valueNode.asText());
-        log.debug("RTDS 60s TWAP BTC/USD: {}", twapPrice);
+        JsonNode obsTimestampNode = payload.get("timestamp");
+        if (obsTimestampNode == null) {
+            log.warn("RTDS TWAP update missing payload.timestamp; skipping rather than guessing an observation time");
+            return;
+        }
+        long observedAtMillis = obsTimestampNode.longValue();
+
+        BigDecimal twapPrice = extractPrice(payload);
+        if (twapPrice == null) {
+            log.warn("RTDS TWAP update had no usable price field, skipping");
+            return;
+        }
+
+        log.debug("RTDS 60s TWAP BTC/USD: {} @ {}", twapPrice, observedAtMillis);
 
         // Store in global Prices
         prices.setPolymarketPrice(twapPrice);
+
+        // Drive the live probability table from Polymarket's own TWAP series
+        rollingWindow.addAndUpdateTable(observedAtMillis, twapPrice.doubleValue(), probabilityTable);
+    }
+
+    /**
+     * Prefers full_accuracy_value (exact signed E18 fixed-point string) over
+     * the display-only numeric "value" field per Polymarket's docs. Falls
+     * back to "value" only if full_accuracy_value is missing or unparsable.
+     */
+    private BigDecimal extractPrice(JsonNode payload) {
+        JsonNode fullAccuracyNode = payload.get("full_accuracy_value");
+        if (fullAccuracyNode != null) {
+            try {
+                BigInteger raw = new BigInteger(fullAccuracyNode.stringValue());
+                return new BigDecimal(raw).divide(new BigDecimal(E18));
+            } catch (Exception e) {
+                log.warn("Failed to parse full_accuracy_value '{}', falling back to value", fullAccuracyNode);
+            }
+        }
+
+        JsonNode valueNode = payload.get("value");
+        if (valueNode == null) return null;
+        try {
+            return valueNode.decimalValue();
+        } catch (Exception e) {
+            log.error("Failed to parse TWAP value node '{}'", valueNode);
+            return null;
+        }
     }
 }

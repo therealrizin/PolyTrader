@@ -70,9 +70,13 @@ public class Prices {
      * Records one price snapshot per live-data tick. Keeping a count rather
      * than a time cutoff guarantees that the API exposes exactly the latest
      * ten one-second samples once the service has warmed up.
+     *
+     * Paired against avg60sPrice, not the instantaneous avgPrice: Polymarket's
+     * polymarketPrice is itself a 60s TWAP, so comparing it to an unwindowed
+     * average would be comparing two different smoothing bases.
      */
     public synchronized void recordPriceSnapshot(long timestampMillis) {
-        polymarketRecentHistory.addLast(new PolymarketSample(timestampMillis, polymarketPrice, avgPrice));
+        polymarketRecentHistory.addLast(new PolymarketSample(timestampMillis, polymarketPrice, avg60sPrice));
         while (polymarketRecentHistory.size() > 10) {
             polymarketRecentHistory.pollFirst();
         }

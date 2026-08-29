@@ -16,11 +16,11 @@ public record PricesResponse(
         BigDecimal okxPrice,
         List<PriceHistoryPoint> last10Seconds
 ) {
-    public record PriceHistoryPoint(long timestampMillis, BigDecimal polymarketPrice, BigDecimal avgPrice) {}
+    public record PriceHistoryPoint(long timestampMillis, BigDecimal polymarketPrice, BigDecimal avg60sPrice) {}
 
     public static PricesResponse gatherPrices(Prices prices) {
         List<PriceHistoryPoint> history = prices.getPolymarketRecentHistory().stream()
-                .map(p -> new PriceHistoryPoint(p.timestampMillis(), p.polymarketPrice(), p.avgPrice()))
+                .map(p -> new PriceHistoryPoint(p.timestampMillis(), p.polymarketPrice(), p.avg60sPrice()))
                 .toList();
 
         return new PricesResponse(

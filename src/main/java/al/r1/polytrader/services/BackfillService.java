@@ -35,8 +35,7 @@ public class BackfillService {
     private void downloadTwoWeeks(String symbol) {
 
         long end = System.currentTimeMillis();
-        //TODO change to 14 days later
-        long start = end - Duration.ofHours(1).toMillis();
+        long start = end - Duration.ofDays(3).toMillis();
 
         long current = start;
         List<BinanceKline> candles = new ArrayList<>();

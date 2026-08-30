@@ -1,8 +1,5 @@
 package al.r1.polytrader.services;
 
-import al.r1.polytrader.services.binance.BinanceService;
-import al.r1.polytrader.services.coinbase.CoinbaseService;
-import al.r1.polytrader.services.kraken.KrakenService;
 import al.r1.polytrader.services.model.PriceSummary;
 import al.r1.polytrader.services.model.PriceTickAggregators;
 import al.r1.polytrader.services.model.Prices;
@@ -29,6 +26,7 @@ public class LiveMarketDataService {
     private final TaskScheduler liveDataTaskScheduler;
     private final PriceTickAggregators tickAggregators;
     private final PolymarketService polymarketService;
+    private final TradingDecisionService tradingDecisionService;
 
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
 
@@ -40,6 +38,7 @@ public class LiveMarketDataService {
         );
         scheduledTask.set(future);
         polymarketService.start();
+        tradingDecisionService.start();
         log.info("Live market data collection started");
     }
 
@@ -49,6 +48,7 @@ public class LiveMarketDataService {
             future.cancel(false);
             log.info("Live market data collection stopped");
         }
+        tradingDecisionService.stop();
         polymarketService.stop();
     }
 

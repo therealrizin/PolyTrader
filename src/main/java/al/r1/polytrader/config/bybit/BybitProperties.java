@@ -3,5 +3,5 @@ package al.r1.polytrader.config.bybit;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-@ConfigurationProperties(prefix = "bybit")
+@ConfigurationProperties(prefix = "services.bybit")
 public record BybitProperties(String wssUrl) { }

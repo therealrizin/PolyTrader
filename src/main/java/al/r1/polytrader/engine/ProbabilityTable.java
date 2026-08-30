@@ -51,6 +51,34 @@ public class ProbabilityTable {
         this.weight = 1;
     }
 
+    public double getChance(double seconds, double chance) {
+        int time = (int) Math.round(seconds);
+
+        if (time < 1 || time > 300) {
+            return 0.0;
+        }
+
+        // 0.001% resolution, with 0.000% at index 500
+        int bucket = (int) Math.round(chance * 1000) + 500;
+
+        // Clamp to catch-all buckets
+        bucket = Math.max(0, Math.min(1000, bucket));
+
+        double value = probabilitiesTable[time][bucket];
+
+        // Total observations for this time
+        double total = 0.0;
+        for (double count : probabilitiesTable[time]) {
+            total += count;
+        }
+
+        if (total == 0.0) {
+            return 0.0;
+        }
+
+        return value / total;
+    }
+
     public void updateProbabilitiesTable(int time, double changePure, boolean newRecord) {
         int changeArea = mapChangeArea(changePure);
 

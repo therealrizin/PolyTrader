@@ -1,7 +1,9 @@
 package al.r1.polytrader.services.coinbase;
 
-import al.r1.polytrader.config.services.ServicesWssProperties;
+import al.r1.polytrader.config.coinbase.CoinbaseProperties;
 import al.r1.polytrader.services.model.CurrencyPairs;
+import al.r1.polytrader.services.model.PriceTickAggregators;
+import al.r1.polytrader.services.model.Prices;
 import jakarta.annotation.PostConstruct;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -39,9 +41,11 @@ public class CoinbaseService {
     private static final Duration STALENESS_CHECK_INTERVAL = Duration.ofSeconds(5);
     private static final String PRODUCT_ID = "BTC-USD";
 
-    private final ServicesWssProperties properties;
+    private final CoinbaseProperties properties;
     private final ObjectMapper objectMapper;
     private final TaskScheduler liveDataTaskScheduler;
+    private final Prices prices;
+    private final PriceTickAggregators tickAggregators;
 
     @Getter
     private final Map<CurrencyPairs, BigDecimal> latestPrice = new ConcurrentHashMap<>();
@@ -50,12 +54,16 @@ public class CoinbaseService {
     private final AtomicReference<WebSocketSession> currentSession = new AtomicReference<>();
     private volatile WebSocketClient client;
 
-    public CoinbaseService(ServicesWssProperties properties,
+    public CoinbaseService(CoinbaseProperties properties,
                            ObjectMapper objectMapper,
-                           TaskScheduler liveDataTaskScheduler) {
+                           TaskScheduler liveDataTaskScheduler,
+                           Prices prices,
+                           PriceTickAggregators tickAggregators) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
+        this.prices = prices;
+        this.tickAggregators = tickAggregators;
     }
 
     @PostConstruct
@@ -66,7 +74,7 @@ public class CoinbaseService {
 
     public void connect() {
         client = new StandardWebSocketClient();
-        String url = properties.coinbase();
+        String url = properties.wssUrl();
 
         client.execute(new TextWebSocketHandler() {
 
@@ -131,6 +139,12 @@ public class CoinbaseService {
             // Coinbase sends price as a JSON string, not a number.
             BigDecimal price = new BigDecimal(priceNode.stringValue());
             latestPrice.put(CurrencyPairs.BTCUSD, price);
+
+            // Live update on every tick — TODO #2 — plus per-second
+            // accumulation for the summary API — TODO #3.
+            prices.setCoinbasePrice(price);
+            tickAggregators.getCoinbase().record(price);
+
             lastMessageAtMillis = System.currentTimeMillis();
         } catch (Exception e) {
             log.warn("Failed to parse Coinbase ticker price '{}'", priceNode, e);

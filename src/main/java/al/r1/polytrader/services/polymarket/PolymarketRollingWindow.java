@@ -5,22 +5,6 @@ import al.r1.polytrader.engine.ProbabilityTable;
 import java.util.ArrayDeque;
 import java.util.Deque;
 
-/**
- * Feeds the shared ProbabilityTable from Polymarket's own Chainlink-computed
- * 60s TWAP samples, rather than recomputing an average locally.
- *
- * Unlike RollingPriceWindow (Binance), this does NOT sum/average raw ticks —
- * Chainlink already hands us the 60s TWAP value directly, and we don't
- * reproduce their smoothing/sampling logic locally (see Polymarket docs:
- * "do not independently reproduce the value without a specification from
- * Chainlink").
- *
- * Ordering guarantee: elapsedSeconds is derived only from Chainlink's
- * observationsTimestamp (payload.timestamp), never wall-clock arrival time.
- * A sample at or before the last accepted observation is dropped rather than
- * risked corrupting the table with an out-of-order or duplicate RTDS push
- * (e.g. after a reconnect).
- */
 public class PolymarketRollingWindow {
 
     private record TwapPoint(long observedAtMillis, double avg60) {}
@@ -30,7 +14,7 @@ public class PolymarketRollingWindow {
 
     public synchronized void addAndUpdateTable(long observedAtMillis, double avg60, ProbabilityTable table) {
         if (observedAtMillis <= lastObservedAtMillis) {
-            return; // stale, duplicate, or out-of-order RTDS delivery — skip
+            return;
         }
         lastObservedAtMillis = observedAtMillis;
 

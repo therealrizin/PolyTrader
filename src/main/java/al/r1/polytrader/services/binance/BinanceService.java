@@ -2,6 +2,8 @@ package al.r1.polytrader.services.binance;
 
 import al.r1.polytrader.config.binance.BinanceProperties;
 import al.r1.polytrader.services.model.CurrencyPairs;
+import al.r1.polytrader.services.model.PriceTickAggregators;
+import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.binance.model.BinanceKline;
 import al.r1.polytrader.services.binance.model.BinanceTradeEvent;
 import jakarta.annotation.PostConstruct;
@@ -47,6 +49,8 @@ public class BinanceService {
     private final ObjectMapper objectMapper;
     private final BinanceProperties binanceProperties;
     private final TaskScheduler liveDataTaskScheduler;
+    private final Prices prices;
+    private final PriceTickAggregators tickAggregators;
 
     @Getter
     private final Map<CurrencyPairs, BigDecimal> latestPrice = new ConcurrentHashMap<>();
@@ -65,11 +69,15 @@ public class BinanceService {
 
     public BinanceService(@Qualifier("binanceWebClient") WebClient webClient, ObjectMapper objectMapper,
                           BinanceProperties binanceProperties,
-                          TaskScheduler liveDataTaskScheduler) {
+                          TaskScheduler liveDataTaskScheduler,
+                          Prices prices,
+                          PriceTickAggregators tickAggregators) {
         this.webClient = webClient;
         this.objectMapper = objectMapper;
         this.binanceProperties = binanceProperties;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
+        this.prices = prices;
+        this.tickAggregators = tickAggregators;
     }
 
     @PostConstruct
@@ -98,7 +106,19 @@ public class BinanceService {
                 try {
                     BinanceTradeEvent event = objectMapper.readValue(message.getPayload(), BinanceTradeEvent.class);
                     BigDecimal price = new BigDecimal(event.p());
-                    latestPrice.put(CurrencyPairs.getUsdXValue(symbol), price);
+                    CurrencyPairs usdPair = CurrencyPairs.getUsdXValue(symbol);
+                    latestPrice.put(usdPair, price);
+
+                    // Live update on every single tick — TODO #2. Distinct
+                    // from the 1Hz aggregator below: this keeps Prices'
+                    // instantaneous fields (and downstream avgPrice/avg60sPrice)
+                    // current the moment a trade arrives, rather than waiting
+                    // for the once-a-second poll.
+                    if (usdPair == CurrencyPairs.BTCUSD) {
+                        prices.setBinancePrice(price);
+                        tickAggregators.getBinance().record(price);
+                    }
+
                     lastMessageAtMillis.put(symbol, System.currentTimeMillis());
                     log.debug("Binance trade {} price={} tradeId={}", symbol.getValue(), price, event.t());
                 } catch (Exception e) {

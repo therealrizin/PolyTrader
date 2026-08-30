@@ -1,7 +1,9 @@
 package al.r1.polytrader.services.kraken;
 
-import al.r1.polytrader.config.services.ServicesWssProperties;
+import al.r1.polytrader.config.kraken.KrakenProperties;
 import al.r1.polytrader.services.model.CurrencyPairs;
+import al.r1.polytrader.services.model.PriceTickAggregators;
+import al.r1.polytrader.services.model.Prices;
 import jakarta.annotation.PostConstruct;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -45,9 +47,11 @@ public class KrakenService {
     private static final Duration STALENESS_CHECK_INTERVAL = Duration.ofSeconds(5);
     private static final String SYMBOL = "BTC/USD";
 
-    private final ServicesWssProperties properties;
+    private final KrakenProperties properties;
     private final ObjectMapper objectMapper;
     private final TaskScheduler liveDataTaskScheduler;
+    private final Prices prices;
+    private final PriceTickAggregators tickAggregators;
 
     @Getter
     private final Map<CurrencyPairs, BigDecimal> latestPrice = new ConcurrentHashMap<>();
@@ -60,12 +64,16 @@ public class KrakenService {
     // without a corresponding close callback.
     private volatile WebSocketClient client;
 
-    public KrakenService(ServicesWssProperties properties,
+    public KrakenService(KrakenProperties properties,
                          ObjectMapper objectMapper,
-                         TaskScheduler liveDataTaskScheduler) {
+                         TaskScheduler liveDataTaskScheduler,
+                         Prices prices,
+                         PriceTickAggregators tickAggregators) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
+        this.prices = prices;
+        this.tickAggregators = tickAggregators;
     }
 
     @PostConstruct
@@ -76,7 +84,7 @@ public class KrakenService {
 
     public void connect() {
         client = new StandardWebSocketClient();
-        String url = properties.kraken();
+        String url = properties.wssUrl();
 
         client.execute(new TextWebSocketHandler() {
 
@@ -142,7 +150,12 @@ public class KrakenService {
         JsonNode priceNode = lastTrade.get("price");
         if (priceNode == null) return;
 
-        latestPrice.put(CurrencyPairs.BTCUSD, priceNode.decimalValue());
+        BigDecimal price = priceNode.decimalValue();
+        latestPrice.put(CurrencyPairs.BTCUSD, price);
+
+        prices.setKrakenPrice(price);
+        tickAggregators.getKraken().record(price);
+
         lastMessageAtMillis = System.currentTimeMillis();
     }
 

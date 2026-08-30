@@ -2,7 +2,9 @@ package al.r1.polytrader.services.polymarket;
 
 import al.r1.polytrader.config.polymarket.PolymarketProperties;
 import al.r1.polytrader.engine.ProbabilityTable;
+import al.r1.polytrader.engine.TradingEngine;
 import al.r1.polytrader.services.model.Prices;
+import al.r1.polytrader.services.polymarket.model.PolymarketMarketSnapshot;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.TaskScheduler;
@@ -18,21 +20,13 @@ import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Consumes Chainlink 60s TWAP prices for BTC/USD via Polymarket RTDS.
- * Uses the configured wss_live_data_url from application.yaml.
- *
- * This is now the *live* driver of ProbabilityTable. BackfillService seeds
- * the table once from Binance history at startup; from then on, table
- * updates come only from this class, so the histogram isn't a blend of two
- * differently-computed 60s-average methodologies.
- */
 @Slf4j
 @Service
 public class PolymarketTwapClient {
@@ -46,6 +40,8 @@ public class PolymarketTwapClient {
     private final ProbabilityTable probabilityTable;
     private final ObjectMapper objectMapper;
     private final TaskScheduler taskScheduler;
+    private final PolymarketDataProvider marketDataProvider;
+    private final TradingEngine tradingEngine;
 
     private final AtomicReference<WebSocketSession> currentSession = new AtomicReference<>();
     private final PolymarketRollingWindow rollingWindow = new PolymarketRollingWindow();
@@ -55,12 +51,16 @@ public class PolymarketTwapClient {
                                 Prices prices,
                                 ProbabilityTable probabilityTable,
                                 ObjectMapper objectMapper,
-                                TaskScheduler liveDataTaskScheduler) {
+                                TaskScheduler liveDataTaskScheduler,
+                                PolymarketDataProvider marketDataProvider,
+                                TradingEngine tradingEngine) {
         this.properties = properties;
         this.prices = prices;
         this.probabilityTable = probabilityTable;
         this.objectMapper = objectMapper;
         this.taskScheduler = liveDataTaskScheduler;
+        this.marketDataProvider = marketDataProvider;
+        this.tradingEngine = tradingEngine;
     }
 
     public synchronized void start() {
@@ -186,13 +186,27 @@ public class PolymarketTwapClient {
 
         // Drive the live probability table from Polymarket's own TWAP series
         rollingWindow.addAndUpdateTable(observedAtMillis, twapPrice.doubleValue(), probabilityTable);
+
+        // current market data and run a trade evaluation.
+        evaluateTrade();
     }
 
-    /**
-     * Prefers full_accuracy_value (exact signed E18 fixed-point string) over
-     * the display-only numeric "value" field per Polymarket's docs. Falls
-     * back to "value" only if full_accuracy_value is missing or unparsable.
-     */
+    private void evaluateTrade() {
+        marketDataProvider.currentSnapshot().ifPresentOrElse(this::runDecision,
+                () -> log.debug("No open market snapshot yet, skipping trade evaluation"));
+    }
+
+    private void runDecision(PolymarketMarketSnapshot snapshot) {
+        BigDecimal avg60s = prices.getAvg60sPrice();
+        if (avg60s == null || avg60s.signum() == 0) {
+            log.debug("No blended 60s average yet, skipping trade evaluation");
+            return;
+        }
+
+        double requiredPctChange = snapshot.strikePriceUsd().subtract(avg60s)
+                .divide(avg60s, 8, RoundingMode.HALF_UP).doubleValue();
+    }
+
     private BigDecimal extractPrice(JsonNode payload) {
         JsonNode fullAccuracyNode = payload.get("full_accuracy_value");
         if (fullAccuracyNode != null) {

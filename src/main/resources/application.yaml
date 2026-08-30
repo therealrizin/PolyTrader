@@ -2,11 +2,8 @@ spring:
   application:
     name: PolyTrader
 
-services:
-  coinbase: wss://ws-feed.exchange.coinbase.com
-  kraken: wss://ws.kraken.com/v2
-  bybit: wss://stream.bybit.com/v5/public/spot
-  okx: wss://ws.okx.com:8443/ws/v5/public.
+polymarket:
+  wss_live_data_url: wss://ws-live-data.polymarket.com
 
 binance:
   base_url: https://api.binance.com
@@ -14,5 +11,11 @@ binance:
   api_key: ${BINANCE_API_KEY}
   secret: ${BINANCE_SECRET}
 
-polymarket:
-  wss_live_data_url: wss://ws-live-data.polymarket.com
+coinbase:
+  wss_url: wss://ws-feed.exchange.coinbase.com
+kraken:
+  wss_url: wss://ws.kraken.com/v2
+bybit:
+  wss_url: wss://stream.bybit.com/v5/public/spot
+okx:
+  wss_url: wss://ws.okx.com:8443/ws/v5/public

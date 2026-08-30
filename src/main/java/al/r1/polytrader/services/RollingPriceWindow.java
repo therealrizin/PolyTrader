@@ -27,16 +27,11 @@ public class RollingPriceWindow {
         }
         double currentAvg60 = windowSum60 / window.size();
 
-        // BUG FIX: records are immutable, so the placeholder avg60=0 above was
-        // never actually replaced in the original code. Every past.avg60() read
-        // 0 forever, making `currentAvg60 / past.avg60()` a permanent div-by-zero.
         window.pollLast();
         window.addLast(new PricePoint(closeTime, close, currentAvg60));
 
         window.removeIf(p -> closeTime - p.closeTime() > 300_000);
 
-        // One observation was added. Individual elapsed-time buckets below
-        // belong to that same observation and must not inflate this count.
         table.updateNumberOfChecks();
         for (PricePoint past : window) {
             if (past.closeTime() == closeTime) continue;

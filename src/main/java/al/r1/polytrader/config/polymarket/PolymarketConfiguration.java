@@ -11,6 +11,9 @@ public class PolymarketConfiguration {
 
     @Bean
     public WebClient gammaWebClient(PolymarketProperties properties) {
-        return WebClient.builder().baseUrl(properties.gammaBaseUrl()).build();
+        return WebClient.builder()
+                .baseUrl(properties.gammaBaseUrl())
+                .defaultHeader("User-Agent", "PolyTrader/1.0")
+                .build();
     }
 }

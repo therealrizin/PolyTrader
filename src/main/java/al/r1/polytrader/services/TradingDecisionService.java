@@ -24,12 +24,21 @@ import java.util.concurrent.atomic.AtomicReference;
  * TradingEngine together into a once-per-second check-and-decide loop.
  * Only ever places {@link MockBetService} bets — no real trading is wired
  * up here, regardless of trading.mock.
+ *
+ * Logging: every tick that reaches a full evaluation emits an INFO-level
+ * EVAL trace line with current price, the market snapshot, and the
+ * computed odds/EV, followed by an explicit DECISION line. Skip reasons
+ * that would otherwise repeat identically every second (no snapshot yet,
+ * bet already open for this window, etc.) are logged once at INFO on
+ * transition and then dropped to DEBUG for as long as the same state
+ * persists, with a 30s INFO heartbeat so the log never goes silent.
  */
 @Slf4j
 @Service
 public class TradingDecisionService {
 
     private static final int MIN_SECONDS_TO_ACT = 2;
+    private static final Duration SKIP_HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
 
     private final Prices prices;
     private final TradingEngine tradingEngine;
@@ -39,6 +48,10 @@ public class TradingDecisionService {
     private final TaskScheduler liveDataTaskScheduler;
 
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
+
+    // De-duplication state for repetitive skip-reason logging.
+    private final AtomicReference<String> lastSkipKey = new AtomicReference<>();
+    private final AtomicReference<Instant> lastSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
 
     public TradingDecisionService(Prices prices,
                                   TradingEngine tradingEngine,
@@ -79,19 +92,41 @@ public class TradingDecisionService {
             mockBetService.settleDueBets(prices);
 
             Optional<PolymarketMarketSnapshot> snapshotOpt = marketDataProvider.currentSnapshot();
-            if (snapshotOpt.isEmpty()) return;
+            if (snapshotOpt.isEmpty()) {
+                logSkip("NO_SNAPSHOT", null, "no open Polymarket market snapshot yet");
+                return;
+            }
 
             PolymarketMarketSnapshot snapshot = snapshotOpt.get();
 
-            if (snapshot.secondsUntilClose() < MIN_SECONDS_TO_ACT) return;
-            if (mockBetService.hasOpenBetFor(snapshot.slug())) return; // one bet per window
+            if (snapshot.secondsUntilClose() < MIN_SECONDS_TO_ACT) {
+                logSkip("TOO_CLOSE_TO_CLOSE", snapshot.slug(),
+                        "secondsUntilClose=" + snapshot.secondsUntilClose() + " minSecondsToAct=" + MIN_SECONDS_TO_ACT);
+                return;
+            }
+
+            if (mockBetService.hasOpenBetFor(snapshot.slug())) {
+                logSkip("BET_ALREADY_OPEN", snapshot.slug(), "one bet per window already placed");
+                return;
+            }
 
             BigDecimal currentPrice = prices.getAvg60sPrice();
-            if (currentPrice == null || currentPrice.signum() == 0) return;
+            if (currentPrice == null || currentPrice.signum() == 0) {
+                logSkip("NO_CURRENT_PRICE", snapshot.slug(), "avg60sPrice not available yet");
+                return;
+            }
 
-            if (snapshot.upPrice() == null || snapshot.downPrice() == null) return;
+            if (snapshot.upPrice() == null || snapshot.downPrice() == null) {
+                logSkip("MISSING_MARKET_PRICES", snapshot.slug(),
+                        "upPrice=" + snapshot.upPrice() + " downPrice=" + snapshot.downPrice());
+                return;
+            }
             double upMarketPrice = snapshot.upPrice().doubleValue();
             double downMarketPrice = snapshot.downPrice().doubleValue();
+
+            // A full evaluation is happening this tick — clear skip
+            // de-dup state so a future repeated skip logs fresh at INFO.
+            lastSkipKey.set(null);
 
             UpDownEvEstimate estimate = tradingEngine.estimateUpDown(
                     currentPrice,
@@ -102,14 +137,28 @@ public class TradingDecisionService {
                     tradingProperties.takerFee()
             );
 
+            // Full odds/prices trace — this is the line to watch live to
+            // see what the engine is thinking every second.
+            log.info("EVAL slug={} secondsUntilClose={} currentPrice={} referencePrice(strike)={} " +
+                            "upMarketPrice={} downMarketPrice={} upChance={} downChance={} upEv={} downEv={} " +
+                            "recommendedSide={} recommendedChance={} recommendedEv={} thresholds(minWinChance={}, minEv={})",
+                    snapshot.slug(), snapshot.secondsUntilClose(), currentPrice, snapshot.strikePriceUsd(),
+                    upMarketPrice, downMarketPrice,
+                    round(estimate.upChance()), round(estimate.downChance()),
+                    round(estimate.upEv()), round(estimate.downEv()),
+                    estimate.recommendedSide(), round(estimate.recommendedChance()), round(estimate.recommendedEv()),
+                    tradingProperties.minimumWinChance(), tradingProperties.minimumExpectedEv());
+
             if (estimate.recommendedChance() < tradingProperties.minimumWinChance()) {
-                log.debug("Skipping {}: win chance {} below threshold {}",
-                        snapshot.slug(), estimate.recommendedChance(), tradingProperties.minimumWinChance());
+                log.info("DECISION skip reason=WIN_CHANCE_BELOW_THRESHOLD slug={} side={} winChance={} threshold={}",
+                        snapshot.slug(), estimate.recommendedSide(),
+                        round(estimate.recommendedChance()), tradingProperties.minimumWinChance());
                 return;
             }
             if (estimate.recommendedEv() < tradingProperties.minimumExpectedEv()) {
-                log.debug("Skipping {}: EV {} below threshold {}",
-                        snapshot.slug(), estimate.recommendedEv(), tradingProperties.minimumExpectedEv());
+                log.info("DECISION skip reason=EV_BELOW_THRESHOLD slug={} side={} ev={} threshold={}",
+                        snapshot.slug(), estimate.recommendedSide(),
+                        round(estimate.recommendedEv()), tradingProperties.minimumExpectedEv());
                 return;
             }
 
@@ -127,8 +176,41 @@ public class TradingDecisionService {
                     tradingProperties.mockBetAmount(),
                     tradingProperties.takerFee()
             );
+
+            log.info("DECISION action=BET_PLACED slug={} side={} amount={} priceBetAt={} priceToAchieve={} " +
+                            "marketPriceForSide={} winChance={} ev={}",
+                    snapshot.slug(), estimate.recommendedSide(), tradingProperties.mockBetAmount(),
+                    currentPrice, snapshot.strikePriceUsd(), marketPriceForSide,
+                    round(estimate.recommendedChance()), round(estimate.recommendedEv()));
         } catch (Exception e) {
             log.error("Error during trading decision evaluation", e);
         }
+    }
+
+    /**
+     * Logs a skip reason at INFO the first time this (reason, slug)
+     * combination is seen, then drops to DEBUG for as long as the exact
+     * same state repeats — with a periodic INFO heartbeat so the log
+     * doesn't go completely silent for minutes at a time.
+     */
+    private void logSkip(String reason, String slug, String detail) {
+        String key = reason + "|" + slug;
+        String previousKey = lastSkipKey.getAndSet(key);
+        boolean changed = !key.equals(previousKey);
+
+        boolean heartbeatDue = Duration.between(lastSkipHeartbeatAt.get(), Instant.now())
+                .compareTo(SKIP_HEARTBEAT_INTERVAL) >= 0;
+
+        if (changed || heartbeatDue) {
+            if (heartbeatDue) lastSkipHeartbeatAt.set(Instant.now());
+            log.info("DECISION skip reason={} slug={} detail='{}'{}",
+                    reason, slug, detail, changed ? "" : " (heartbeat, state unchanged)");
+        } else {
+            log.debug("DECISION skip reason={} slug={} detail='{}'", reason, slug, detail);
+        }
+    }
+
+    private double round(double value) {
+        return Math.round(value * 10000.0) / 10000.0;
     }
 }

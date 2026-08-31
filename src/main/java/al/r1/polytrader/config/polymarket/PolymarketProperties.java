@@ -7,5 +7,8 @@ public record PolymarketProperties(
         String wssLiveDataUrl,
         String gammaBaseUrl,
         String clobWssUrl,
+        String marketWssUrl,
+        String apiKey,
+        String apiKeyAddress,
         int marketRefreshSeconds
 ) {}

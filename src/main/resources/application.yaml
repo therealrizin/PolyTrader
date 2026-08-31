@@ -6,6 +6,7 @@ services:
   polymarket:
     wss_live_data_url: wss://ws-live-data.polymarket.com
     gamma_base_url: https://gamma-api.polymarket.com
+    clob_wss_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
     market_refresh_seconds: 1
   binance:
     base_url: https://api.binance.com

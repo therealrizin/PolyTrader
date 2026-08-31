@@ -6,5 +6,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public record PolymarketProperties(
         String wssLiveDataUrl,
         String gammaBaseUrl,
+        String clobWssUrl,
         int marketRefreshSeconds
 ) {}

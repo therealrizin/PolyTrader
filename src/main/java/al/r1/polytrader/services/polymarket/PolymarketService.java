@@ -8,12 +8,15 @@ import org.springframework.stereotype.Service;
 public class PolymarketService {
 
     private final PolymarketTwapClient twapClient;
+    private final PolymarketClobWebSocketClient clobWebSocketClient;
 
     public void start() {
         twapClient.start();
+        clobWebSocketClient.start();
     }
 
     public void stop() {
         twapClient.stop();
+        clobWebSocketClient.stop();
     }
 }

@@ -139,9 +139,6 @@ public class CoinbaseService {
             // Coinbase sends price as a JSON string, not a number.
             BigDecimal price = new BigDecimal(priceNode.stringValue());
             latestPrice.put(CurrencyPairs.BTCUSD, price);
-
-            // Live update on every tick — TODO #2 — plus per-second
-            // accumulation for the summary API — TODO #3.
             prices.setCoinbasePrice(price);
             tickAggregators.getCoinbase().record(price);
 

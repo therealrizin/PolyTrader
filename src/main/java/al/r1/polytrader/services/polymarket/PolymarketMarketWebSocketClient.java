@@ -456,6 +456,7 @@ public class PolymarketMarketWebSocketClient {
         }
     }
 
+    // Centralised update – handles nulls correctly
     private void updateBestPrices(MarketSide side, BigDecimal bid, BigDecimal ask) {
         if (bid != null) bestBidBySide.put(side, bid);
         else bestBidBySide.remove(side);
@@ -566,8 +567,5 @@ public class PolymarketMarketWebSocketClient {
         }
     }
 
-    // ------------------------------------------------------------------------
-    // TokenIds record
-    // ------------------------------------------------------------------------
     private record TokenIds(String upTokenId, String downTokenId) {}
 }

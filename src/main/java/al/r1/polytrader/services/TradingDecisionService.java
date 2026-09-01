@@ -24,14 +24,6 @@ import java.util.concurrent.atomic.AtomicReference;
  * TradingEngine together into a once-per-second check-and-decide loop.
  * Only ever places {@link MockBetService} bets — no real trading is wired
  * up here, regardless of trading.mock.
- *
- * Logging: every tick that reaches a full evaluation emits an INFO-level
- * EVAL trace line with current price, the market snapshot, and the
- * computed odds/EV, followed by an explicit DECISION line. Skip reasons
- * that would otherwise repeat identically every second (no snapshot yet,
- * bet already open for this window, etc.) are logged once at INFO on
- * transition and then dropped to DEBUG for as long as the same state
- * persists, with a 30s INFO heartbeat so the log never goes silent.
  */
 @Slf4j
 @Service
@@ -124,8 +116,7 @@ public class TradingDecisionService {
             double upMarketPrice = snapshot.upPrice().doubleValue();
             double downMarketPrice = snapshot.downPrice().doubleValue();
 
-            // A full evaluation is happening this tick — clear skip
-            // de-dup state so a future repeated skip logs fresh at INFO.
+            // Clear skip de‑dup state now that we have a full evaluation
             lastSkipKey.set(null);
 
             UpDownEvEstimate estimate = tradingEngine.estimateUpDown(
@@ -137,8 +128,7 @@ public class TradingDecisionService {
                     tradingProperties.takerFee()
             );
 
-            // Full odds/prices trace — this is the line to watch live to
-            // see what the engine is thinking every second.
+            // Full odds/prices trace
             log.info("EVAL slug={} secondsUntilClose={} currentPrice={} referencePrice(strike)={} " +
                             "upMarketPrice={} downMarketPrice={} upChance={} downChance={} upEv={} downEv={} " +
                             "recommendedSide={} recommendedChance={} recommendedEv={} thresholds(minWinChance={}, minEv={})",
@@ -164,23 +154,22 @@ public class TradingDecisionService {
 
             double marketPriceForSide = estimate.recommendedSide() == MarketSide.UP ? upMarketPrice : downMarketPrice;
 
+            // Place the mock bet with the fixed amount from configuration
             mockBetService.placeMockBet(
                     snapshot.slug(),
                     estimate.recommendedSide(),
-                    currentPrice,
-                    snapshot.strikePriceUsd(),
-                    marketPriceForSide,
+                    BigDecimal.valueOf(marketPriceForSide),   // priceBetAt = entry odds
+                    snapshot.strikePriceUsd(),                // priceToAchieve = strike
+                    marketPriceForSide,                       // marketPriceAtBet (for logging)
                     estimate.recommendedEv(),
                     estimate.recommendedChance(),
-                    snapshot.secondsUntilClose(),
-                    tradingProperties.mockBetAmount(),
-                    tradingProperties.takerFee()
+                    snapshot.secondsUntilClose()
             );
 
             log.info("DECISION action=BET_PLACED slug={} side={} amount={} priceBetAt={} priceToAchieve={} " +
                             "marketPriceForSide={} winChance={} ev={}",
                     snapshot.slug(), estimate.recommendedSide(), tradingProperties.mockBetAmount(),
-                    currentPrice, snapshot.strikePriceUsd(), marketPriceForSide,
+                    marketPriceForSide, snapshot.strikePriceUsd(), marketPriceForSide,
                     round(estimate.recommendedChance()), round(estimate.recommendedEv()));
         } catch (Exception e) {
             log.error("Error during trading decision evaluation", e);

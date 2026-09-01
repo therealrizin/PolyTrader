@@ -1,6 +1,7 @@
 package al.r1.polytrader.services.polymarket;
 
 import al.r1.polytrader.config.polymarket.PolymarketProperties;
+import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.model.PolymarketMarketSnapshot;
 import jakarta.annotation.PostConstruct;
@@ -20,41 +21,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Resolves the currently-open Polymarket "BTC Up or Down" 5-minute market
- * (e.g. https://polymarket.com/event/btc-updown-5m-1788107700) via the
- * public Gamma API and exposes it as a {@link PolymarketMarketSnapshot}.
- *
- * CONFIRMED against live behavior (previously flagged as unverified):
- * - The event slug is "btc-updown-5m-{unixEpochSecondsOfWindowSTART}" — the
- *   timestamp is the window's OPEN time (aligned to a 300s boundary), NOT
- *   the close time. Using the close-time epoch here previously resolved to
- *   the wrong (next) window's slug, which never matches a real event.
- * - Gamma resolves slugs via GET /events?slug={slug} (query parameter,
- *   response is a JSON ARRAY of events), not /events/slug/{slug} (path
- *   parameter, single object). The path-style call 404s.
- * - Gamma's outcomes/outcomePrices/clobTokenIds arrays are ordered
- *   [Up, Down] for this market — still worth spot-checking a live payload
- *   if EV/side selection ever looks inverted, since Gamma has been known to
- *   vary field encoding (see parseJsonDecimalArray below).
- * - market.outcomePrices is effectively the LAST EXECUTED TRADE price, not
- *   a live order-book price — on a thin/short-dated market like this it can
- *   sit static for tens of seconds and then jump when a trade finally
- *   prints. Gamma's market object separately exposes top-level bestBid/
- *   bestAsk fields (plain numbers, not JSON-string-encoded like
- *   outcomePrices) which track the live order book and move continuously.
- *   We now prefer bestBid/bestAsk midpoint, falling back to
- *   lastTradePrice, and only falling back further to outcomePrices if
- *   neither is present — see resolveMarketPrices below.
- * - This market type has no fixed strike price — it resolves on whether the
- *   price at close is above or below the price at window open. We
- *   approximate the open price with our own blended feed's avg60sPrice the
- *   moment we detect a new window (slug change), which is itself only an
- *   approximation of whatever Chainlink price Polymarket actually anchors
- *   the window to.
- */
 @Slf4j
 @Component
 public class PolymarketDataProvider {
@@ -68,12 +37,16 @@ public class PolymarketDataProvider {
     private final PolymarketProperties properties;
     private final TaskScheduler liveDataTaskScheduler;
     private final Prices prices;
+    private final PolymarketMarketWebSocketClient webSocketClient;
 
     private final AtomicReference<String> currentSlug = new AtomicReference<>();
     private final AtomicReference<BigDecimal> referenceOpenPrice = new AtomicReference<>();
     private final AtomicReference<PolymarketMarketSnapshot> latestSnapshot = new AtomicReference<>();
 
-    // De-duplication state for the SNAPSHOT_OK log line.
+    // WebSocket‑fed real‑time prices for each side (midpoint)
+    private final ConcurrentHashMap<MarketSide, BigDecimal> livePrices = new ConcurrentHashMap<>();
+
+    // De-duplication state for logging.
     private final AtomicReference<String> lastLoggedSignature = new AtomicReference<>();
     private final AtomicReference<Instant> lastSnapshotHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
 
@@ -81,12 +54,14 @@ public class PolymarketDataProvider {
                                   ObjectMapper objectMapper,
                                   PolymarketProperties properties,
                                   TaskScheduler liveDataTaskScheduler,
-                                  Prices prices) {
+                                  Prices prices,
+                                  PolymarketMarketWebSocketClient webSocketClient) {
         this.gammaWebClient = gammaWebClient;
         this.objectMapper = objectMapper;
         this.properties = properties;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
         this.prices = prices;
+        this.webSocketClient = webSocketClient;
     }
 
     @PostConstruct
@@ -113,60 +88,34 @@ public class PolymarketDataProvider {
         try {
             String slug = computeCurrentSlug();
 
-            JsonNode event = fetchEventBySlug(slug);
-            if (event == null) {
-                log.info("REFRESH result=NO_EVENT slug={} detail='Gamma returned no event for this slug " +
-                        "(check gammaBaseUrl, slug format, and whether the market is pre-listed yet)'", slug);
-                latestSnapshot.set(null);
-                return;
-            }
-
-            JsonNode marketsNode = event.get("markets");
-            if (marketsNode == null || !marketsNode.isArray() || marketsNode.isEmpty()) {
-                log.warn("REFRESH result=NO_MARKETS slug={} detail='event found but markets[] missing/empty'", slug);
-                latestSnapshot.set(null);
-                return;
-            }
-            JsonNode market = marketsNode.get(0);
-
-            List<BigDecimal> priceResult = resolveMarketPrices(market, slug);
-            if (priceResult == null) {
-                latestSnapshot.set(null);
-                return;
-            }
-            BigDecimal upPrice = priceResult.get(0);
-            BigDecimal downPrice = priceResult.get(1);
-
-            JsonNode endDateNode = market.get("endDate");
-            long endEpochMillis = endDateNode != null
-                    ? Instant.parse(endDateNode.stringValue()).toEpochMilli()
-                    : System.currentTimeMillis();
-            long secondsUntilClose = Math.max(0, (endEpochMillis - System.currentTimeMillis()) / 1000);
-
+            // -------- Detect new window and subscribe to WebSocket --------
             String previousSlug = currentSlug.getAndSet(slug);
             if (!slug.equals(previousSlug)) {
                 referenceOpenPrice.set(null);
-                log.info("REFRESH result=NEW_WINDOW slug={} secondsUntilClose={}", slug, secondsUntilClose);
+                livePrices.clear();
+                log.info("REFRESH result=NEW_WINDOW slug={}", slug);
+                // Subscribe to the new market via WebSocket
+                webSocketClient.subscribe(slug, this::onWebSocketPriceUpdate);
             }
 
-            BigDecimal strikePriceUsd = referenceOpenPrice.get();
-            if (strikePriceUsd == null) {
+            // -------- Capture reference open price (if not set) --------
+            if (referenceOpenPrice.get() == null) {
                 BigDecimal openPrice = prices.getAvg60sPrice() != null ? prices.getAvg60sPrice() : prices.getAvgPrice();
                 if (openPrice != null) {
                     referenceOpenPrice.set(openPrice);
-                    strikePriceUsd = openPrice;
                     log.info("REFRESH result=REFERENCE_PRICE_CAPTURED slug={} referenceOpenPrice={}", slug, openPrice);
                 } else {
-                    log.info("REFRESH result=NO_REFERENCE_PRICE_YET slug={} avgPrice={} avg60sPrice={} " +
-                                    "detail='no provider has delivered a price tick yet — check exchange websocket connection logs'",
+                    log.debug("REFRESH result=NO_REFERENCE_PRICE_YET slug={} avgPrice={} avg60sPrice={}",
                             slug, prices.getAvgPrice(), prices.getAvg60sPrice());
-                    latestSnapshot.set(null);
+                    // Still try to produce a snapshot if we have WebSocket prices; otherwise keep null.
+                    updateSnapshotFromWebSocketOrGamma(slug);
                     return;
                 }
             }
 
-            latestSnapshot.set(new PolymarketMarketSnapshot(slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd));
-            logSnapshot(slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd);
+            // -------- Build snapshot from WebSocket (preferred) or Gamma (fallback) --------
+            updateSnapshotFromWebSocketOrGamma(slug);
+
         } catch (Exception e) {
             log.error("REFRESH result=ERROR detail='exception during Polymarket market refresh'", e);
             latestSnapshot.set(null);
@@ -174,37 +123,136 @@ public class PolymarketDataProvider {
     }
 
     /**
-     * Logs the SNAPSHOT_OK result at INFO only when upPrice/downPrice/
-     * strikePriceUsd actually changed since the last log, or every
-     * SNAPSHOT_HEARTBEAT_INTERVAL regardless — otherwise DEBUG.
-     *
-     * Gamma's outcomePrices field on /events is a slower, sometimes
-     * cached mid/last-trade price rather than a live CLOB order-book
-     * price, so it can legitimately sit unchanged for many refresh
-     * cycles even while the real market is moving. This makes that
-     * distinction visible: "changed=false" + a shrinking heartbeat
-     * cadence means "still polling successfully, Gamma just hasn't
-     * updated its cached price," not "stuck/broken."
+     * Updates the snapshot using live WebSocket prices if available;
+     * otherwise falls back to the Gamma REST API.
      */
-    private void logSnapshot(String slug, BigDecimal upPrice, BigDecimal downPrice,
-                             long secondsUntilClose, BigDecimal strikePriceUsd) {
-        String signature = slug + "|" + upPrice + "|" + downPrice + "|" + strikePriceUsd;
-        String previousSignature = lastLoggedSignature.getAndSet(signature);
-        boolean changed = !signature.equals(previousSignature);
+    private void updateSnapshotFromWebSocketOrGamma(String slug) {
+        BigDecimal upPrice = livePrices.get(MarketSide.UP);
+        BigDecimal downPrice = livePrices.get(MarketSide.DOWN);
 
-        boolean heartbeatDue = Duration.between(lastSnapshotHeartbeatAt.get(), Instant.now())
-                .compareTo(SNAPSHOT_HEARTBEAT_INTERVAL) >= 0;
-
-        if (changed || heartbeatDue) {
-            if (heartbeatDue) lastSnapshotHeartbeatAt.set(Instant.now());
-            log.info("REFRESH result=SNAPSHOT_OK slug={} upPrice={} downPrice={} secondsUntilClose={} " +
-                            "strikePriceUsd={} changed={}",
-                    slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd, changed);
+        if (upPrice != null && downPrice != null) {
+            // We have live WebSocket prices – use them
+            long endEpochMillis = fetchEndEpochFromGamma(slug);
+            long secondsUntilClose = Math.max(0, (endEpochMillis - System.currentTimeMillis()) / 1000);
+            BigDecimal strike = referenceOpenPrice.get();
+            if (strike == null) {
+                log.debug("No reference price yet, cannot build snapshot");
+                return;
+            }
+            latestSnapshot.set(new PolymarketMarketSnapshot(slug, upPrice, downPrice, secondsUntilClose, strike));
+            logSnapshot(slug, upPrice, downPrice, secondsUntilClose, strike);
         } else {
-            log.debug("REFRESH result=SNAPSHOT_OK slug={} upPrice={} downPrice={} secondsUntilClose={} " +
-                            "strikePriceUsd={} changed=false",
-                    slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd);
+            // Fallback to Gamma REST snapshot
+            BigDecimal[] pricesFromGamma = fetchGammaPrices(slug);
+            if (pricesFromGamma == null) {
+                latestSnapshot.set(null);
+                return;
+            }
+            long endEpochMillis = fetchEndEpochFromGamma(slug);
+            long secondsUntilClose = Math.max(0, (endEpochMillis - System.currentTimeMillis()) / 1000);
+            BigDecimal strike = referenceOpenPrice.get();
+            if (strike == null) {
+                log.debug("No reference price yet, cannot build snapshot");
+                return;
+            }
+            latestSnapshot.set(new PolymarketMarketSnapshot(slug, pricesFromGamma[0], pricesFromGamma[1],
+                    secondsUntilClose, strike));
+            logSnapshot(slug, pricesFromGamma[0], pricesFromGamma[1], secondsUntilClose, strike);
         }
+    }
+
+    /**
+     * Callback from the WebSocket client – updates the livePrices map.
+     */
+    private void onWebSocketPriceUpdate(MarketSide side, BigDecimal bestBid, BigDecimal bestAsk) {
+        // Compute midpoint as the market price for this side
+        if (bestBid != null && bestAsk != null) {
+            BigDecimal mid = bestBid.add(bestAsk).divide(BigDecimal.valueOf(2), 6, RoundingMode.HALF_UP);
+            livePrices.put(side, mid);
+            log.debug("WebSocket price update: side={} mid={}", side, mid);
+        } else {
+            // If one side is missing, we cannot compute a reliable midpoint; remove the stale value.
+            livePrices.remove(side);
+            log.debug("WebSocket price update: side={} has incomplete BBO (bid={}, ask={}) – removed", side, bestBid, bestAsk);
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Gamma REST helpers
+    // ------------------------------------------------------------------------
+    private BigDecimal[] fetchGammaPrices(String slug) {
+        JsonNode market = fetchMarketBySlug(slug);
+        if (market == null) return null;
+        List<BigDecimal> priceResult = resolveMarketPrices(market, slug);
+        if (priceResult == null) return null;
+        return new BigDecimal[]{priceResult.get(0), priceResult.get(1)};
+    }
+
+    private long fetchEndEpochFromGamma(String slug) {
+        JsonNode market = fetchMarketBySlug(slug);
+        if (market == null) return System.currentTimeMillis() + 5 * 60 * 1000; // fallback 5 min
+        JsonNode endDateNode = market.get("endDate");
+        if (endDateNode != null) {
+            try {
+                return Instant.parse(endDateNode.stringValue()).toEpochMilli();
+            } catch (Exception e) {
+                log.warn("Failed to parse endDate: {}", endDateNode, e);
+            }
+        }
+        return System.currentTimeMillis() + 5 * 60 * 1000;
+    }
+
+    private JsonNode fetchMarketBySlug(String slug) {
+        JsonNode event = fetchEventBySlug(slug);
+        if (event == null) return null;
+        JsonNode marketsNode = event.get("markets");
+        if (marketsNode == null || !marketsNode.isArray() || marketsNode.isEmpty()) {
+            log.warn("REFRESH result=NO_MARKETS slug={}", slug);
+            return null;
+        }
+        return marketsNode.get(0);
+    }
+
+    /**
+     * Slug timestamp is the window's OPEN time (floor to the nearest 300s
+     * boundary), not the close time — see class javadoc.
+     */
+    private String computeCurrentSlug() {
+        long nowSeconds = System.currentTimeMillis() / 1000;
+        long windowSeconds = WINDOW.toSeconds();
+        long windowStart = (nowSeconds / windowSeconds) * windowSeconds;
+        return SLUG_PREFIX + windowStart;
+    }
+
+    /**
+     * GET /events?slug={slug} — query parameter, NOT a path segment.
+     * Gamma returns a JSON ARRAY of matching events (typically 0 or 1
+     * elements for an exact slug match), not a single event object.
+     */
+    private JsonNode fetchEventBySlug(String slug) {
+        JsonNode response = gammaWebClient.get()
+                .uri(uriBuilder -> uriBuilder
+                        .path("/events")
+                        .queryParam("slug", slug)
+                        .build())
+                .retrieve()
+                .bodyToMono(JsonNode.class)
+                .onErrorResume(e -> {
+                    log.warn("Gamma event lookup failed for slug {}: {}", slug, e.toString());
+                    return Mono.empty();
+                })
+                .block();
+
+        if (response == null) return null;
+
+        if (response.isArray()) {
+            return response.isEmpty() ? null : response.get(0);
+        }
+
+        // Defensive: if Gamma ever returns a single object instead of an
+        // array (e.g. API change), still handle it rather than silently
+        // returning nothing.
+        return response;
     }
 
     /**
@@ -219,14 +267,11 @@ public class PolymarketDataProvider {
      *      lastTradePrice, kept only as a last-resort fallback in case a
      *      payload omits the other fields.
      *
-     * ASSUMPTION (unchanged from before): the single top-level
-     * bestBid/bestAsk/lastTradePrice fields, and index 0 of
-     * outcomePrices, all refer to the "Up" outcome; "Down" is its
-     * complement (1 - price). Still worth spot-checking a live payload
-     * if EV/side selection ever looks inverted.
+     * ASSUMPTION: the single top-level bestBid/bestAsk/lastTradePrice fields,
+     * and index 0 of outcomePrices, all refer to the "Up" outcome; "Down" is its
+     * complement (1 - price).
      *
-     * Returns null (and logs the reason) if no usable price could be
-     * resolved at all.
+     * Returns null (and logs the reason) if no usable price could be resolved.
      */
     private List<BigDecimal> resolveMarketPrices(JsonNode market, String slug) {
         BigDecimal bestBid = parseDecimalField(market.get("bestBid"));
@@ -275,48 +320,6 @@ public class PolymarketDataProvider {
     }
 
     /**
-     * Slug timestamp is the window's OPEN time (floor to the nearest 300s
-     * boundary), not the close time — see class javadoc.
-     */
-    private String computeCurrentSlug() {
-        long nowSeconds = System.currentTimeMillis() / 1000;
-        long windowSeconds = WINDOW.toSeconds();
-        long windowStart = (nowSeconds / windowSeconds) * windowSeconds;
-        return SLUG_PREFIX + windowStart;
-    }
-
-    /**
-     * GET /events?slug={slug} — query parameter, NOT a path segment.
-     * Gamma returns a JSON ARRAY of matching events (typically 0 or 1
-     * elements for an exact slug match), not a single event object.
-     */
-    private JsonNode fetchEventBySlug(String slug) {
-        JsonNode response = gammaWebClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/events")
-                        .queryParam("slug", slug)
-                        .build())
-                .retrieve()
-                .bodyToMono(JsonNode.class)
-                .onErrorResume(e -> {
-                    log.warn("Gamma event lookup failed for slug {}: {}", slug, e.toString());
-                    return Mono.empty();
-                })
-                .block();
-
-        if (response == null) return null;
-
-        if (response.isArray()) {
-            return response.isEmpty() ? null : response.get(0);
-        }
-
-        // Defensive: if Gamma ever returns a single object instead of an
-        // array (e.g. API change), still handle it rather than silently
-        // returning nothing.
-        return response;
-    }
-
-    /**
      * Handles both encodings Gamma has been observed to use for this
      * field: a JSON-array-encoded STRING (e.g. "[\"0.5\",\"0.5\"]"), or a
      * native JSON array node.
@@ -332,6 +335,30 @@ public class PolymarketDataProvider {
         } catch (Exception e) {
             log.warn("Failed to parse Gamma JSON-array field '{}'", node, e);
             return List.of();
+        }
+    }
+
+    // ------------------------------------------------------------------------
+    // Logging
+    // ------------------------------------------------------------------------
+    private void logSnapshot(String slug, BigDecimal upPrice, BigDecimal downPrice,
+                             long secondsUntilClose, BigDecimal strikePriceUsd) {
+        String signature = slug + "|" + upPrice + "|" + downPrice + "|" + strikePriceUsd;
+        String previousSignature = lastLoggedSignature.getAndSet(signature);
+        boolean changed = !signature.equals(previousSignature);
+
+        boolean heartbeatDue = Duration.between(lastSnapshotHeartbeatAt.get(), Instant.now())
+                .compareTo(SNAPSHOT_HEARTBEAT_INTERVAL) >= 0;
+
+        if (changed || heartbeatDue) {
+            if (heartbeatDue) lastSnapshotHeartbeatAt.set(Instant.now());
+            log.info("REFRESH result=SNAPSHOT_OK slug={} upPrice={} downPrice={} secondsUntilClose={} " +
+                            "strikePriceUsd={} changed={}",
+                    slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd, changed);
+        } else {
+            log.debug("REFRESH result=SNAPSHOT_OK slug={} upPrice={} downPrice={} secondsUntilClose={} " +
+                            "strikePriceUsd={} changed=false",
+                    slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd);
         }
     }
 }

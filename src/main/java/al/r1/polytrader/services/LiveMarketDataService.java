@@ -31,15 +31,26 @@ public class LiveMarketDataService {
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
 
     public void start() {
-        ScheduledFuture<?> future = liveDataTaskScheduler.scheduleAtFixedRate(
-                this::tick,
-                Instant.now().plusSeconds(1),
-                Duration.ofSeconds(1)
+        // 1. Start the live data pipeline immediately (no blocking)
+        scheduledTask.set(
+                liveDataTaskScheduler.scheduleAtFixedRate(
+                        this::tick,
+                        Instant.now().plusSeconds(1),
+                        Duration.ofSeconds(1)
+                )
         );
-        scheduledTask.set(future);
         polymarketService.start();
-        tradingDecisionService.start();
-        log.info("Live market data collection started");
+
+        // 2. Schedule the TradingDecisionService to start 2 minutes later
+        liveDataTaskScheduler.schedule(
+                () -> {
+                    tradingDecisionService.start();
+                    log.info("TradingDecisionService started after 2-minute warmup.");
+                },
+                Instant.now().plusSeconds(120)
+        );
+
+        log.info("Live market data collection started; TradingDecisionService will start in 2 minutes.");
     }
 
     public void stop() {

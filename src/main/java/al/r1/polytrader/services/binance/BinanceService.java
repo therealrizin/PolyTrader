@@ -109,11 +109,6 @@ public class BinanceService {
                     CurrencyPairs usdPair = CurrencyPairs.getUsdXValue(symbol);
                     latestPrice.put(usdPair, price);
 
-                    // Live update on every single tick — TODO #2. Distinct
-                    // from the 1Hz aggregator below: this keeps Prices'
-                    // instantaneous fields (and downstream avgPrice/avg60sPrice)
-                    // current the moment a trade arrives, rather than waiting
-                    // for the once-a-second poll.
                     if (usdPair == CurrencyPairs.BTCUSD) {
                         prices.setBinancePrice(price);
                         tickAggregators.getBinance().record(price);

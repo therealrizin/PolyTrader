@@ -2,6 +2,10 @@ spring:
   application:
     name: PolyTrader
 
+logging:
+  level:
+    al.r1.polytrader.services.polymarket.PolymarketDataProvider: INFO
+
 services:
   polymarket:
     wss_live_data_url: wss://ws-live-data.polymarket.com

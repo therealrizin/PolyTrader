@@ -31,6 +31,13 @@ public class Prices {
 
     private final Map<ChainlinkSymbol, SymbolState> states = new EnumMap<>(ChainlinkSymbol.class);
 
+    // Raw per-exchange spot prices, kept separate from the Chainlink-keyed
+    // data above. These are informational/legacy (tick aggregation, manual
+    // inspection) and must never be blended back into the Chainlink price
+    // that TradingDecisionService and PolymarketDataProvider treat as the
+    // canonical reference — see PolymarketDataProvider's class comment.
+    private final Map<PriceProviders, BigDecimal> providerPrices = new EnumMap<>(PriceProviders.class);
+
     public Prices() {
         for (ChainlinkSymbol symbol : ChainlinkSymbol.values()) {
             states.put(symbol, SymbolState.empty());
@@ -65,5 +72,27 @@ public class Prices {
 
     public synchronized List<PricePoint> getRecentHistory(ChainlinkSymbol symbol) {
         return new ArrayList<>(states.get(symbol).history());
+    }
+
+    // ------------------------------------------------------------------
+    // Raw per-exchange spot prices (not Chainlink-derived, not blended
+    // into the reference price used for trading decisions)
+    // ------------------------------------------------------------------
+
+    public void setProviderPrice(PriceProviders provider, BigDecimal price) {
+        if (provider == null || price == null) return;
+        providerPrices.put(provider, price);
+    }
+
+    public void setBinancePrice(BigDecimal price) {
+        setProviderPrice(PriceProviders.BINANCE, price);
+    }
+
+    public void setPolymarketPrice(BigDecimal price) {
+        setProviderPrice(PriceProviders.POLYMARKET, price);
+    }
+
+    public BigDecimal getProviderPrice(PriceProviders provider) {
+        return providerPrices.get(provider);
     }
 }

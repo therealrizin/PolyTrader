@@ -1,5 +1,6 @@
 package al.r1.polytrader.services.betting;
 
+import al.r1.polytrader.config.model.TradingProperties;
 import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.services.betting.model.BetStatus;
 import al.r1.polytrader.services.betting.model.MockBet;
@@ -25,17 +26,17 @@ public class MockBetService {
 
     private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
 
-    @Value("${trading.taker-fee:0.07}")
-    private double takerFee;
-
-    @Value("${trading.mock-bet-amount:1.0}")
-    private BigDecimal mockBetAmount;
+    private final TradingProperties tradingProperties;
 
     private final Map<String, MockBet> bets = new ConcurrentHashMap<>();
     private final Set<String> openSlugs = ConcurrentHashMap.newKeySet();
 
     public boolean hasOpenBetFor(String slug) {
         return openSlugs.contains(slug);
+    }
+
+    public MockBetService(TradingProperties tradingProperties) {
+        this.tradingProperties = tradingProperties;
     }
 
     public MockBet placeMockBet(
@@ -52,12 +53,12 @@ public class MockBetService {
         Instant now = Instant.now();
         Instant resolvesAt = now.plusSeconds(Math.max(secondsUntilClose, 0));
 
-        BigDecimal amount = mockBetAmount;
+        BigDecimal amount = tradingProperties.mockBetAmount();
         BigDecimal marketPrice = BigDecimal.valueOf(marketPriceAtBet).setScale(4, RoundingMode.HALF_UP);
 
         BigDecimal grossPayout = amount.divide(marketPrice, 8, RoundingMode.HALF_UP);
         BigDecimal grossProfit = grossPayout.subtract(amount);
-        BigDecimal netProfitIfWin = grossProfit.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(takerFee)))
+        BigDecimal netProfitIfWin = grossProfit.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(tradingProperties.takerFee())))
                 .setScale(4, RoundingMode.HALF_UP);
 
         MockBet bet = new MockBet(
@@ -115,7 +116,7 @@ public class MockBetService {
 
             BigDecimal profitLoss;
             if (won) {
-                profitLoss = grossProfit.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(takerFee)))
+                profitLoss = grossProfit.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(tradingProperties.takerFee())))
                         .setScale(4, RoundingMode.HALF_UP);
             } else {
                 profitLoss = bet.amount().negate();
@@ -156,7 +157,7 @@ public class MockBetService {
                     bet.amount(),
                     grossPayout.setScale(4, RoundingMode.HALF_UP),
                     grossProfit.setScale(4, RoundingMode.HALF_UP),
-                    takerFee,
+                    tradingProperties.takerFee(),
                     profitLoss);
         }
     }

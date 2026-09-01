@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicReference;
 @Service
 public class TradingDecisionService {
 
-    private static final int MIN_SECONDS_TO_ACT = 2;
+    private static final int MIN_SECONDS_TO_ACT = 10;
     private static final Duration SKIP_HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
     private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
 
@@ -97,6 +97,12 @@ public class TradingDecisionService {
             if (snapshot.secondsUntilClose() < MIN_SECONDS_TO_ACT) {
                 logSkip("TOO_CLOSE_TO_CLOSE", snapshot.slug(),
                         "secondsUntilClose=" + snapshot.secondsUntilClose() + " minSecondsToAct=" + MIN_SECONDS_TO_ACT);
+                return;
+            }
+
+            if (snapshot.secondsSinceOpen() < MIN_SECONDS_TO_ACT) {
+                logSkip("TOO_EARLY_TO_BET", snapshot.slug(),
+                        "secondsSinceOpen=" + snapshot.secondsSinceOpen() + " minSecondsToAct=" + MIN_SECONDS_TO_ACT);
                 return;
             }
 

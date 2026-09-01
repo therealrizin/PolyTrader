@@ -1,5 +1,6 @@
 package al.r1.polytrader.services.binance;
 
+import al.r1.polytrader.config.binance.BinanceProperties;
 import al.r1.polytrader.services.model.CurrencyPairs;
 import al.r1.polytrader.services.model.PriceTickAggregators;
 import al.r1.polytrader.services.model.Prices;
@@ -49,6 +50,7 @@ public class BinanceService {
     private final TaskScheduler liveDataTaskScheduler;
     private final Prices prices;
     private final PriceTickAggregators tickAggregators;
+    private final BinanceProperties binanceProperties;
 
     @Getter
     private final Map<CurrencyPairs, BigDecimal> latestPrice = new ConcurrentHashMap<>();
@@ -68,12 +70,14 @@ public class BinanceService {
     public BinanceService(@Qualifier("binanceWebClient") WebClient webClient, ObjectMapper objectMapper,
                           TaskScheduler liveDataTaskScheduler,
                           Prices prices,
-                          PriceTickAggregators tickAggregators) {
+                          PriceTickAggregators tickAggregators,
+                          BinanceProperties binanceProperties) {
         this.webClient = webClient;
         this.objectMapper = objectMapper;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
         this.prices = prices;
         this.tickAggregators = tickAggregators;
+        this.binanceProperties = binanceProperties;
     }
 
     @PostConstruct

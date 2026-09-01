@@ -155,7 +155,7 @@ public class PolymarketDataProvider {
             }
 
             latestSnapshot.set(new PolymarketMarketSnapshot(
-                    slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd));
+                    slug, upPrice, downPrice, secondsUntilClose, strikePriceUsd, secondsSinceOpen));
             logSnapshot(slug, upPrice, downPrice, secondsUntilClose, secondsSinceOpen, strikePriceUsd);
         } catch (Exception e) {
             log.error("REFRESH result=ERROR detail='exception during Polymarket market refresh'", e);

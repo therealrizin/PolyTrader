@@ -18,15 +18,17 @@ public record PricesResponse(
         BigDecimal avg60sPrice,
         List<PricePoint> last60Seconds
 ) {
+    private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
+
     public static PricesResponse gatherPrices(Prices prices) {
-        List<PricePoint> history = prices.getRecentHistory(symbol).stream()
+        List<PricePoint> history = prices.getRecentHistory(SYMBOL).stream()
                 .sorted(Comparator.comparing(PricePoint::date, Comparator.reverseOrder()))
                 .toList();
 
         return new PricesResponse(
-                symbol,
-                prices.getPrice(symbol),
-                prices.getAvg60sPrice(symbol),
+                SYMBOL,
+                prices.getPrice(SYMBOL),
+                prices.getAvg60sPrice(SYMBOL),
                 history
         );
     }

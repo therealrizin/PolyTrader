@@ -3,6 +3,7 @@ package al.r1.polytrader.services.polymarket;
 import al.r1.polytrader.config.polymarket.PolymarketProperties;
 import al.r1.polytrader.engine.ProbabilityTable;
 import al.r1.polytrader.engine.TradingEngine;
+import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.model.PolymarketMarketSnapshot;
 import jakarta.annotation.PreDestroy;
@@ -197,7 +198,7 @@ public class PolymarketTwapClient {
     }
 
     private void runDecision(PolymarketMarketSnapshot snapshot) {
-        BigDecimal avg60s = prices.getAvg60sPrice();
+        BigDecimal avg60s = prices.getAvg60sPrice(ChainlinkSymbol.BTC_USD);
         if (avg60s == null || avg60s.signum() == 0) {
             log.debug("No blended 60s average yet, skipping trade evaluation");
             return;

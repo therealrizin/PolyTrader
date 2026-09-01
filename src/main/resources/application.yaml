@@ -28,4 +28,3 @@ trading:
   minimum-win-chance: 0.20
   taker-fee: 0.07
   mock-bet-amount: 1
-  minimum-seconds-since-open: 5

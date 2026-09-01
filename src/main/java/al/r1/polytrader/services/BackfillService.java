@@ -4,11 +4,14 @@ import al.r1.polytrader.engine.ProbabilityTable;
 import al.r1.polytrader.services.binance.BinanceService;
 import al.r1.polytrader.services.binance.model.BinanceKline;
 import al.r1.polytrader.services.model.CurrencyPairs;
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -18,17 +21,22 @@ public class BackfillService {
 
     BinanceService binanceService;
     ProbabilityTable probabilityTable;
+    private final TaskScheduler taskScheduler;
 
     private static final Logger log = LoggerFactory.getLogger(BackfillService.class);
 
-    public BackfillService(BinanceService binanceService, ProbabilityTable probabilityTable) {
-        this.binanceService = binanceService;
+    public BackfillService(TaskScheduler taskScheduler, ProbabilityTable probabilityTable, BinanceService binanceService) {
+        this.taskScheduler = taskScheduler;
         this.probabilityTable = probabilityTable;
+        this.binanceService = binanceService;
+    }
+
+    @PostConstruct
+    public void init() {
+        taskScheduler.schedule(this::gatherAndAnalyze, Instant.now());
     }
 
     public void gatherAndAnalyze() {
-        // Match the liquid stream used by BinanceService. CurrencyPairs maps
-        // BTCUSDT to the application-level BTCUSD price series.
         downloadTwoWeeks(CurrencyPairs.BTCUSDT.getValue());
     }
 

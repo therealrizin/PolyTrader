@@ -1,10 +1,11 @@
 package al.r1.polytrader.services;
 
-import al.r1.polytrader.config.trading.TradingProperties;
+import al.r1.polytrader.config.model.TradingProperties;
 import al.r1.polytrader.engine.TradingEngine;
 import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.engine.model.UpDownEvEstimate;
 import al.r1.polytrader.services.betting.MockBetService;
+import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.PolymarketDataProvider;
 import al.r1.polytrader.services.polymarket.model.PolymarketMarketSnapshot;
@@ -19,18 +20,13 @@ import java.util.Optional;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Ties the live price feeds, the Polymarket 5-min up/down snapshot, and
- * TradingEngine together into a once-per-second check-and-decide loop.
- * Only ever places {@link MockBetService} bets — no real trading is wired
- * up here, regardless of trading.mock.
- */
 @Slf4j
 @Service
 public class TradingDecisionService {
 
     private static final int MIN_SECONDS_TO_ACT = 2;
     private static final Duration SKIP_HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
+    private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
 
     private final Prices prices;
     private final TradingEngine tradingEngine;
@@ -41,7 +37,6 @@ public class TradingDecisionService {
 
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
 
-    // De-duplication state for repetitive skip-reason logging.
     private final AtomicReference<String> lastSkipKey = new AtomicReference<>();
     private final AtomicReference<Instant> lastSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
 
@@ -66,9 +61,10 @@ public class TradingDecisionService {
                 Duration.ofSeconds(1)
         );
         scheduledTask.set(future);
-        log.info("Trading decision loop started (mock={}, minEv={}, minWinChance={}, takerFee={})",
+        log.info("Trading decision loop started (mock={}, minEv={}, minWinChance={}, takerFee={}, minSecondsSinceOpen={})",
                 tradingProperties.mock(), tradingProperties.minimumExpectedEv(),
-                tradingProperties.minimumWinChance(), tradingProperties.takerFee());
+                tradingProperties.minimumWinChance(), tradingProperties.takerFee(),
+                tradingProperties.minimumSecondsSinceOpen());
     }
 
     public void stop() {
@@ -91,6 +87,13 @@ public class TradingDecisionService {
 
             PolymarketMarketSnapshot snapshot = snapshotOpt.get();
 
+            if (snapshot.secondsSinceOpen() < tradingProperties.minimumSecondsSinceOpen()) {
+                logSkip("TOO_SOON_AFTER_OPEN", snapshot.slug(),
+                        "secondsSinceOpen=" + snapshot.secondsSinceOpen()
+                                + " minimumSecondsSinceOpen=" + tradingProperties.minimumSecondsSinceOpen());
+                return;
+            }
+
             if (snapshot.secondsUntilClose() < MIN_SECONDS_TO_ACT) {
                 logSkip("TOO_CLOSE_TO_CLOSE", snapshot.slug(),
                         "secondsUntilClose=" + snapshot.secondsUntilClose() + " minSecondsToAct=" + MIN_SECONDS_TO_ACT);
@@ -102,9 +105,9 @@ public class TradingDecisionService {
                 return;
             }
 
-            BigDecimal currentPrice = prices.getAvg60sPrice();
+            BigDecimal currentPrice = prices.getAvg60sPrice(SYMBOL);
             if (currentPrice == null || currentPrice.signum() == 0) {
-                logSkip("NO_CURRENT_PRICE", snapshot.slug(), "avg60sPrice not available yet");
+                logSkip("NO_CURRENT_PRICE", snapshot.slug(), "Chainlink 60s TWAP not available yet");
                 return;
             }
 
@@ -116,7 +119,6 @@ public class TradingDecisionService {
             double upMarketPrice = snapshot.upPrice().doubleValue();
             double downMarketPrice = snapshot.downPrice().doubleValue();
 
-            // Clear skip de‑dup state now that we have a full evaluation
             lastSkipKey.set(null);
 
             UpDownEvEstimate estimate = tradingEngine.estimateUpDown(
@@ -128,11 +130,10 @@ public class TradingDecisionService {
                     tradingProperties.takerFee()
             );
 
-            // Full odds/prices trace
-            log.info("EVAL slug={} secondsUntilClose={} currentPrice={} referencePrice(strike)={} " +
+            log.info("EVAL slug={} secondsUntilClose={} secondsSinceOpen={} currentPrice={} referencePrice(strike)={} " +
                             "upMarketPrice={} downMarketPrice={} upChance={} downChance={} upEv={} downEv={} " +
                             "recommendedSide={} recommendedChance={} recommendedEv={} thresholds(minWinChance={}, minEv={})",
-                    snapshot.slug(), snapshot.secondsUntilClose(), currentPrice, snapshot.strikePriceUsd(),
+                    snapshot.slug(), snapshot.secondsUntilClose(), snapshot.secondsSinceOpen(), currentPrice, snapshot.strikePriceUsd(),
                     upMarketPrice, downMarketPrice,
                     round(estimate.upChance()), round(estimate.downChance()),
                     round(estimate.upEv()), round(estimate.downEv()),
@@ -154,13 +155,12 @@ public class TradingDecisionService {
 
             double marketPriceForSide = estimate.recommendedSide() == MarketSide.UP ? upMarketPrice : downMarketPrice;
 
-            // Place the mock bet with the fixed amount from configuration
             mockBetService.placeMockBet(
                     snapshot.slug(),
                     estimate.recommendedSide(),
-                    BigDecimal.valueOf(marketPriceForSide),   // priceBetAt = entry odds
-                    snapshot.strikePriceUsd(),                // priceToAchieve = strike
-                    marketPriceForSide,                       // marketPriceAtBet (for logging)
+                    currentPrice,
+                    snapshot.strikePriceUsd(),
+                    marketPriceForSide,
                     estimate.recommendedEv(),
                     estimate.recommendedChance(),
                     snapshot.secondsUntilClose()
@@ -169,19 +169,13 @@ public class TradingDecisionService {
             log.info("DECISION action=BET_PLACED slug={} side={} amount={} priceBetAt={} priceToAchieve={} " +
                             "marketPriceForSide={} winChance={} ev={}",
                     snapshot.slug(), estimate.recommendedSide(), tradingProperties.mockBetAmount(),
-                    marketPriceForSide, snapshot.strikePriceUsd(), marketPriceForSide,
+                    currentPrice, snapshot.strikePriceUsd(), marketPriceForSide,
                     round(estimate.recommendedChance()), round(estimate.recommendedEv()));
         } catch (Exception e) {
             log.error("Error during trading decision evaluation", e);
         }
     }
 
-    /**
-     * Logs a skip reason at INFO the first time this (reason, slug)
-     * combination is seen, then drops to DEBUG for as long as the exact
-     * same state repeats — with a periodic INFO heartbeat so the log
-     * doesn't go completely silent for minutes at a time.
-     */
     private void logSkip(String reason, String slug, String detail) {
         String key = reason + "|" + slug;
         String previousKey = lastSkipKey.getAndSet(key);

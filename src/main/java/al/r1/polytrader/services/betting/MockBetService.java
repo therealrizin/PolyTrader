@@ -3,6 +3,7 @@ package al.r1.polytrader.services.betting;
 import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.services.betting.model.BetStatus;
 import al.r1.polytrader.services.betting.model.MockBet;
+import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,14 +19,11 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * In‑memory mock betting ledger. Uses fixed stake from config and
- * calculates realised profit/loss at settlement, applying taker fee
- * only to profits (not to the principal).
- */
 @Slf4j
 @Service
 public class MockBetService {
+
+    private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
 
     @Value("${trading.taker-fee:0.07}")
     private double takerFee;
@@ -40,15 +38,11 @@ public class MockBetService {
         return openSlugs.contains(slug);
     }
 
-    /**
-     * Places a mock bet with the fixed stake from configuration.
-     * All profit/loss calculations are deferred to settlement.
-     */
     public MockBet placeMockBet(
             String slug,
             MarketSide side,
-            BigDecimal priceBetAt,          // the odds at which we bought
-            BigDecimal priceToAchieve,      // reference price (strike) for outcome
+            BigDecimal priceBetAt,
+            BigDecimal priceToAchieve,
             double marketPriceAtBet,
             double countedEv,
             double countedWinChance,
@@ -59,9 +53,9 @@ public class MockBetService {
         Instant resolvesAt = now.plusSeconds(Math.max(secondsUntilClose, 0));
 
         BigDecimal amount = mockBetAmount;
+        BigDecimal marketPrice = BigDecimal.valueOf(marketPriceAtBet).setScale(4, RoundingMode.HALF_UP);
 
-        // Pre‑compute potential profit if the bet wins (for logging and the record's potentialValue)
-        BigDecimal grossPayout = amount.divide(priceBetAt, 8, RoundingMode.HALF_UP);
+        BigDecimal grossPayout = amount.divide(marketPrice, 8, RoundingMode.HALF_UP);
         BigDecimal grossProfit = grossPayout.subtract(amount);
         BigDecimal netProfitIfWin = grossProfit.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(takerFee)))
                 .setScale(4, RoundingMode.HALF_UP);
@@ -71,12 +65,12 @@ public class MockBetService {
                 slug,
                 side,
                 amount,
-                priceBetAt,                     // corresponds to record's priceBetAt
-                priceToAchieve,                 // record's priceToAchieve
-                BigDecimal.valueOf(marketPriceAtBet),
+                priceBetAt,
+                priceToAchieve,
+                marketPrice,
                 countedEv,
                 countedWinChance,
-                netProfitIfWin,                 // potentialValue (net profit if win)
+                netProfitIfWin,
                 now,
                 resolvesAt,
                 BetStatus.OPEN,
@@ -87,9 +81,9 @@ public class MockBetService {
         bets.put(id, bet);
         openSlugs.add(slug);
 
-        log.info("Placed MOCK bet {} on {} side={} amount={} priceBetAt={} priceToAchieve={} " +
+        log.info("Placed MOCK bet {} on {} side={} amount={} priceBetAt={} priceToAchieve={} marketPrice={} " +
                         "grossPayout={} grossProfit={} netProfitIfWin={} ev={} winChance={}",
-                id, slug, side, amount, priceBetAt, priceToAchieve,
+                id, slug, side, amount, priceBetAt, priceToAchieve, marketPrice,
                 grossPayout.setScale(4, RoundingMode.HALF_UP),
                 grossProfit.setScale(4, RoundingMode.HALF_UP),
                 netProfitIfWin,
@@ -98,10 +92,6 @@ public class MockBetService {
         return bet;
     }
 
-    /**
-     * Called periodically. Settles any open bet whose window has closed.
-     * Actual profit/loss is computed from the stored priceBetAt and the resolution price.
-     */
     public void settleDueBets(Prices prices) {
         Instant now = Instant.now();
 
@@ -109,26 +99,22 @@ public class MockBetService {
             if (bet.status() != BetStatus.OPEN) continue;
             if (now.isBefore(bet.resolvesAt())) continue;
 
-            // Use best available price to resolve the bet
-            BigDecimal resolutionPrice = prices.getAvg60sPrice() != null
-                    ? prices.getAvg60sPrice()
-                    : prices.getAvgPrice();
+            BigDecimal resolutionPrice = prices.getAvg60sPrice(SYMBOL) != null
+                    ? prices.getAvg60sPrice(SYMBOL)
+                    : prices.getPrice(SYMBOL);
 
             if (resolutionPrice == null) {
-                continue; // wait until we have a price
+                continue;
             }
 
-            // Determine win/loss: went up if resolutionPrice > priceToAchieve
             boolean wentUp = resolutionPrice.compareTo(bet.priceToAchieve()) > 0;
             boolean won = (bet.side() == MarketSide.UP) == wentUp;
 
-            // Compute actual P&L from the stored bet parameters
-            BigDecimal grossPayout = bet.amount().divide(bet.priceBetAt(), 8, RoundingMode.HALF_UP);
+            BigDecimal grossPayout = bet.amount().divide(bet.marketPriceAtBet(), 8, RoundingMode.HALF_UP);
             BigDecimal grossProfit = grossPayout.subtract(bet.amount());
 
             BigDecimal profitLoss;
             if (won) {
-                // Fee is applied to gross profit
                 profitLoss = grossProfit.multiply(BigDecimal.ONE.subtract(BigDecimal.valueOf(takerFee)))
                         .setScale(4, RoundingMode.HALF_UP);
             } else {
@@ -137,7 +123,6 @@ public class MockBetService {
 
             BetStatus status = won ? BetStatus.WON : BetStatus.LOST;
 
-            // Create a new immutable bet record with updated status and P&L
             MockBet settled = new MockBet(
                     bet.id(),
                     bet.marketSlug(),
@@ -148,7 +133,7 @@ public class MockBetService {
                     bet.marketPriceAtBet(),
                     bet.countedEv(),
                     bet.countedWinChance(),
-                    bet.potentialValue(),   // keep the original potential value for reference
+                    bet.potentialValue(),
                     bet.placedAt(),
                     bet.resolvesAt(),
                     status,
@@ -160,13 +145,14 @@ public class MockBetService {
             openSlugs.remove(bet.marketSlug());
 
             log.info("Settled MOCK bet {} on {}: {} – resolutionPrice={}, priceToAchieve={}, " +
-                            "priceBetAt={}, amount={}, grossPayout={}, grossProfit={}, fee={}, profitLoss={}",
+                            "priceBetAt={}, marketPriceAtBet={}, amount={}, grossPayout={}, grossProfit={}, fee={}, profitLoss={}",
                     bet.id(),
                     bet.marketSlug(),
                     status,
                     resolutionPrice,
                     bet.priceToAchieve(),
                     bet.priceBetAt(),
+                    bet.marketPriceAtBet(),
                     bet.amount(),
                     grossPayout.setScale(4, RoundingMode.HALF_UP),
                     grossProfit.setScale(4, RoundingMode.HALF_UP),

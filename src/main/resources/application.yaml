@@ -1,3 +1,4 @@
+# src/main/resources/application.yaml
 spring:
   application:
     name: PolyTrader
@@ -20,18 +21,11 @@ services:
     wss_url: wss://stream.binance.com:9443/ws/
     api_key: ${BINANCE_API_KEY}
     secret: ${BINANCE_SECRET}
-  coinbase:
-    wss_url: wss://ws-feed.exchange.coinbase.com
-  kraken:
-    wss_url: wss://ws.kraken.com/v2
-  bybit:
-    wss_url: wss://stream.bybit.com/v5/public/spot
-  okx:
-    wss_url: wss://ws.okx.com:8443/ws/v5/public
 
 trading:
   mock: true
-  minimum-expected-ev: 1.25
-  minimum-win-chance: 0.10
+  minimum-expected-ev: 1.00
+  minimum-win-chance: 0.20
   taker-fee: 0.07
   mock-bet-amount: 1
+  minimum-seconds-since-open: 5

@@ -1,7 +1,6 @@
 package al.r1.polytrader.services;
 
 import al.r1.polytrader.engine.ProbabilityTable;
-import al.r1.polytrader.services.binance.model.BinanceKline;
 
 import java.util.ArrayDeque;
 import java.util.Deque;
@@ -12,10 +11,6 @@ public class RollingPriceWindow {
 
     private final Deque<PricePoint> window = new ArrayDeque<>();
     private double windowSum60 = 0;
-
-    public void addAndUpdateTable(BinanceKline kline, ProbabilityTable table) {
-        addAndUpdateTable(kline.closeTime(), kline.close().doubleValue(), table);
-    }
 
     public void addAndUpdateTable(long closeTime, double close, ProbabilityTable table) {
         windowSum60 += close;

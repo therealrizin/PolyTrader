@@ -1,9 +1,7 @@
 package al.r1.polytrader.services;
 
-import al.r1.polytrader.services.model.PriceSummary;
-import al.r1.polytrader.services.model.PriceTickAggregators;
+import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
-import al.r1.polytrader.services.model.TickAggregator;
 import al.r1.polytrader.services.polymarket.PolymarketService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -13,7 +11,6 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
-import java.time.ZoneId;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -22,16 +19,14 @@ import java.util.concurrent.atomic.AtomicReference;
 @RequiredArgsConstructor
 public class LiveMarketDataService {
 
-    private final Prices globalPrices;
+    private final Prices prices;
     private final TaskScheduler liveDataTaskScheduler;
-    private final PriceTickAggregators tickAggregators;
     private final PolymarketService polymarketService;
     private final TradingDecisionService tradingDecisionService;
 
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
 
     public void start() {
-        // 1. Start the live data pipeline immediately (no blocking)
         scheduledTask.set(
                 liveDataTaskScheduler.scheduleAtFixedRate(
                         this::tick,
@@ -41,7 +36,6 @@ public class LiveMarketDataService {
         );
         polymarketService.start();
 
-        // 2. Schedule the TradingDecisionService to start 2 minutes later
         liveDataTaskScheduler.schedule(
                 () -> {
                     tradingDecisionService.start();
@@ -50,7 +44,8 @@ public class LiveMarketDataService {
                 Instant.now().plusSeconds(120)
         );
 
-        log.info("Live market data collection started; TradingDecisionService will start in 2 minutes.");
+        log.info("Live market data collection started (Chainlink prices via Polymarket RTDS); " +
+                "TradingDecisionService will start in 2 minutes.");
     }
 
     public void stop() {
@@ -65,23 +60,10 @@ public class LiveMarketDataService {
 
     private void tick() {
         try {
-            TickAggregator.FlushResult binanceFlush = tickAggregators.getBinance().flush();
-            TickAggregator.FlushResult coinbaseFlush = tickAggregators.getCoinbase().flush();
-            TickAggregator.FlushResult krakenFlush = tickAggregators.getKraken().flush();
-            TickAggregator.FlushResult bybitFlush = tickAggregators.getBybit().flush();
-            TickAggregator.FlushResult okxFlush = tickAggregators.getOkx().flush();
-
-            globalPrices.recordPriceSnapshot(new PriceSummary(
-                    LocalDateTime.ofInstant(Instant.ofEpochMilli(System.currentTimeMillis()), ZoneId.systemDefault()),
-                    globalPrices.getPolymarketPrice(),
-                    globalPrices.getAvg60sPrice(),
-                    globalPrices.getAvgPrice(),
-                    binanceFlush.averagePrice(),
-                    coinbaseFlush.averagePrice(),
-                    krakenFlush.averagePrice(),
-                    bybitFlush.averagePrice(),
-                    okxFlush.averagePrice()
-            ));
+            LocalDateTime now = LocalDateTime.now();
+            for (ChainlinkSymbol symbol : ChainlinkSymbol.values()) {
+                prices.recordSnapshot(symbol, now);
+            }
         } catch (Exception e) {
             log.error("Error during live data tick", e);
         }

@@ -1,504 +1,69 @@
 package al.r1.polytrader.services.model;
 
-import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.math.RoundingMode;
-import java.util.*;
+import java.time.LocalDateTime;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.EnumMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
-@Getter
+@Slf4j
 @Component
 public class Prices {
 
-    // Overall averages
-    private BigDecimal avgPrice;
-    private BigDecimal avg60sPrice;
+    private static final int HISTORY_SIZE = 60;
 
-    // Count of providers contributing to overall averages
-    private int activeAvgProviders = 0;
-    private int active60sAvgProviders = 0;
-
-    // Polymarket specific (not part of averages)
-    private BigDecimal polymarketPrice;
-
-    // Rolling last-60-seconds summary
-    private final Deque<PriceSummary> recentHistory = new ArrayDeque<>();
-
-    // Binance
-    private BigDecimal binancePrice;
-    private BigDecimal binanceAvg60sPrice;
-    private final Queue<BigDecimal> binancePricesQueue = new ArrayDeque<>();
-    private boolean binanceInAvgPrice = false;
-    private boolean binanceIn60sAvgPrice = false;
-
-    // Coinbase
-    private BigDecimal coinbasePrice;
-    private BigDecimal coinbaseAvg60sPrice;
-    private final Queue<BigDecimal> coinbasePricesQueue = new ArrayDeque<>();
-    private boolean coinbaseInAvgPrice = false;
-    private boolean coinbaseIn60sAvgPrice = false;
-
-    // Kraken
-    private BigDecimal krakenPrice;
-    private BigDecimal krakenAvg60sPrice;
-    private final Queue<BigDecimal> krakenPricesQueue = new ArrayDeque<>();
-    private boolean krakenInAvgPrice = false;
-    private boolean krakenIn60sAvgPrice = false;
-
-    // Bybit
-    private BigDecimal bybitPrice;
-    private BigDecimal bybitAvg60sPrice;
-    private final Queue<BigDecimal> bybitPricesQueue = new ArrayDeque<>();
-    private boolean bybitInAvgPrice = false;
-    private boolean bybitIn60sAvgPrice = false;
-
-    // OKX
-    private BigDecimal okxPrice;
-    private BigDecimal okxAvg60sPrice;
-    private final Queue<BigDecimal> okxPricesQueue = new ArrayDeque<>();
-    private boolean okxInAvgPrice = false;
-    private boolean okxIn60sAvgPrice = false;
-
-    // ------------------------------------------------------------------------
-    // Helpers
-    // ------------------------------------------------------------------------
-
-    private BigDecimal roundPrice(BigDecimal price) {
-        return price.setScale(2, RoundingMode.HALF_UP);
-    }
-
-    // ------------------------------------------------------------------------
-    // Polymarket
-    // ------------------------------------------------------------------------
-
-    public synchronized void setPolymarketPrice(BigDecimal polymarketPrice) {
-        if (polymarketPrice == null) {
-            return;
-        }
-
-        this.polymarketPrice = roundPrice(polymarketPrice);
-    }
-
-    /**
-     * Records one summarized second per LiveMarketDataService tick.
-     */
-    public synchronized void recordPriceSnapshot(PriceSummary summary) {
-        recentHistory.addLast(summary);
-
-        while (recentHistory.size() > 60) {
-            recentHistory.pollFirst();
+    private record SymbolState(
+            AtomicReference<BigDecimal> price,
+            AtomicReference<BigDecimal> avg60sPrice,
+            Deque<PricePoint> history
+    ) {
+        static SymbolState empty() {
+            return new SymbolState(new AtomicReference<>(), new AtomicReference<>(), new ArrayDeque<>());
         }
     }
 
-    public synchronized List<PriceSummary> getRecentHistory() {
-        return new ArrayList<>(recentHistory);
-    }
+    private final Map<ChainlinkSymbol, SymbolState> states = new EnumMap<>(ChainlinkSymbol.class);
 
-    // ------------------------------------------------------------------------
-    // Binance
-    // ------------------------------------------------------------------------
-
-    public synchronized void setBinancePrice(BigDecimal newBinancePrice) {
-        if (newBinancePrice == null) {
-            return;
-        }
-
-        newBinancePrice = roundPrice(newBinancePrice);
-
-        BigDecimal oldPrice = this.binancePrice;
-
-        updateOverallAvgPrice(
-                oldPrice,
-                newBinancePrice,
-                this.binanceInAvgPrice,
-                () -> this.activeAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.binanceInAvgPrice = newInFlag;
-                    this.activeAvgProviders = newCount;
-                },
-                () -> this.avgPrice,
-                newAvg -> this.avgPrice = newAvg
-        );
-
-        this.binancePrice = newBinancePrice;
-
-        updateProvider60sAverage(
-                this.binancePricesQueue,
-                newBinancePrice,
-                this.binanceAvg60sPrice,
-                this.binanceIn60sAvgPrice,
-                () -> this.active60sAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.binanceIn60sAvgPrice = newInFlag;
-                    this.active60sAvgProviders = newCount;
-                },
-                () -> this.binanceAvg60sPrice,
-                newAvg -> this.binanceAvg60sPrice = newAvg,
-                () -> this.avg60sPrice,
-                newOverallAvg -> this.avg60sPrice = newOverallAvg
-        );
-    }
-
-    // ------------------------------------------------------------------------
-    // Coinbase
-    // ------------------------------------------------------------------------
-
-    public synchronized void setCoinbasePrice(BigDecimal newCoinbasePrice) {
-        if (newCoinbasePrice == null) {
-            return;
-        }
-
-        newCoinbasePrice = roundPrice(newCoinbasePrice);
-
-        BigDecimal oldPrice = this.coinbasePrice;
-
-        updateOverallAvgPrice(
-                oldPrice,
-                newCoinbasePrice,
-                this.coinbaseInAvgPrice,
-                () -> this.activeAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.coinbaseInAvgPrice = newInFlag;
-                    this.activeAvgProviders = newCount;
-                },
-                () -> this.avgPrice,
-                newAvg -> this.avgPrice = newAvg
-        );
-
-        this.coinbasePrice = newCoinbasePrice;
-
-        updateProvider60sAverage(
-                this.coinbasePricesQueue,
-                newCoinbasePrice,
-                this.coinbaseAvg60sPrice,
-                this.coinbaseIn60sAvgPrice,
-                () -> this.active60sAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.coinbaseIn60sAvgPrice = newInFlag;
-                    this.active60sAvgProviders = newCount;
-                },
-                () -> this.coinbaseAvg60sPrice,
-                newAvg -> this.coinbaseAvg60sPrice = newAvg,
-                () -> this.avg60sPrice,
-                newOverallAvg -> this.avg60sPrice = newOverallAvg
-        );
-    }
-
-    // ------------------------------------------------------------------------
-    // Kraken
-    // ------------------------------------------------------------------------
-
-    public synchronized void setKrakenPrice(BigDecimal newKrakenPrice) {
-        if (newKrakenPrice == null) {
-            return;
-        }
-
-        newKrakenPrice = roundPrice(newKrakenPrice);
-
-        BigDecimal oldPrice = this.krakenPrice;
-
-        updateOverallAvgPrice(
-                oldPrice,
-                newKrakenPrice,
-                this.krakenInAvgPrice,
-                () -> this.activeAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.krakenInAvgPrice = newInFlag;
-                    this.activeAvgProviders = newCount;
-                },
-                () -> this.avgPrice,
-                newAvg -> this.avgPrice = newAvg
-        );
-
-        this.krakenPrice = newKrakenPrice;
-
-        updateProvider60sAverage(
-                this.krakenPricesQueue,
-                newKrakenPrice,
-                this.krakenAvg60sPrice,
-                this.krakenIn60sAvgPrice,
-                () -> this.active60sAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.krakenIn60sAvgPrice = newInFlag;
-                    this.active60sAvgProviders = newCount;
-                },
-                () -> this.krakenAvg60sPrice,
-                newAvg -> this.krakenAvg60sPrice = newAvg,
-                () -> this.avg60sPrice,
-                newOverallAvg -> this.avg60sPrice = newOverallAvg
-        );
-    }
-
-    // ------------------------------------------------------------------------
-    // Bybit
-    // ------------------------------------------------------------------------
-
-    public synchronized void setBybitPrice(BigDecimal newBybitPrice) {
-        if (newBybitPrice == null) {
-            return;
-        }
-
-        newBybitPrice = roundPrice(newBybitPrice);
-
-        BigDecimal oldPrice = this.bybitPrice;
-
-        updateOverallAvgPrice(
-                oldPrice,
-                newBybitPrice,
-                this.bybitInAvgPrice,
-                () -> this.activeAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.bybitInAvgPrice = newInFlag;
-                    this.activeAvgProviders = newCount;
-                },
-                () -> this.avgPrice,
-                newAvg -> this.avgPrice = newAvg
-        );
-
-        this.bybitPrice = newBybitPrice;
-
-        updateProvider60sAverage(
-                this.bybitPricesQueue,
-                newBybitPrice,
-                this.bybitAvg60sPrice,
-                this.bybitIn60sAvgPrice,
-                () -> this.active60sAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.bybitIn60sAvgPrice = newInFlag;
-                    this.active60sAvgProviders = newCount;
-                },
-                () -> this.bybitAvg60sPrice,
-                newAvg -> this.bybitAvg60sPrice = newAvg,
-                () -> this.avg60sPrice,
-                newOverallAvg -> this.avg60sPrice = newOverallAvg
-        );
-    }
-
-    // ------------------------------------------------------------------------
-    // OKX
-    // ------------------------------------------------------------------------
-
-    public synchronized void setOkxPrice(BigDecimal newOkxPrice) {
-        if (newOkxPrice == null) {
-            return;
-        }
-
-        newOkxPrice = roundPrice(newOkxPrice);
-
-        BigDecimal oldPrice = this.okxPrice;
-
-        updateOverallAvgPrice(
-                oldPrice,
-                newOkxPrice,
-                this.okxInAvgPrice,
-                () -> this.activeAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.okxInAvgPrice = newInFlag;
-                    this.activeAvgProviders = newCount;
-                },
-                () -> this.avgPrice,
-                newAvg -> this.avgPrice = newAvg
-        );
-
-        this.okxPrice = newOkxPrice;
-
-        updateProvider60sAverage(
-                this.okxPricesQueue,
-                newOkxPrice,
-                this.okxAvg60sPrice,
-                this.okxIn60sAvgPrice,
-                () -> this.active60sAvgProviders,
-                (newInFlag, newCount) -> {
-                    this.okxIn60sAvgPrice = newInFlag;
-                    this.active60sAvgProviders = newCount;
-                },
-                () -> this.okxAvg60sPrice,
-                newAvg -> this.okxAvg60sPrice = newAvg,
-                () -> this.avg60sPrice,
-                newOverallAvg -> this.avg60sPrice = newOverallAvg
-        );
-    }
-
-    // ========================================================================
-    // Private helpers for overall avgPrice
-    // ========================================================================
-
-    private void updateOverallAvgPrice(
-            BigDecimal oldPrice,
-            BigDecimal newPrice,
-            boolean alreadyIncluded,
-            IntSupplier currentCountSupplier,
-            BiIntConsumer inclusionUpdater,
-            Supplier<BigDecimal> currentAvgSupplier,
-            Consumer<BigDecimal> avgUpdater) {
-
-        int currentCount = currentCountSupplier.getAsInt();
-
-        if (alreadyIncluded) {
-            if (currentCount > 0) {
-                BigDecimal newAvg = currentAvgSupplier.get()
-                        .multiply(BigDecimal.valueOf(currentCount))
-                        .add(newPrice)
-                        .subtract(oldPrice)
-                        .divide(
-                                BigDecimal.valueOf(currentCount),
-                                2,
-                                RoundingMode.HALF_UP
-                        );
-
-                avgUpdater.accept(newAvg);
-            }
-        } else {
-            if (currentCount == 0) {
-                avgUpdater.accept(newPrice);
-            } else {
-                BigDecimal newAvg = currentAvgSupplier.get()
-                        .multiply(BigDecimal.valueOf(currentCount))
-                        .add(newPrice)
-                        .divide(
-                                BigDecimal.valueOf(currentCount + 1),
-                                2,
-                                RoundingMode.HALF_UP
-                        );
-
-                avgUpdater.accept(newAvg);
-            }
-
-            inclusionUpdater.accept(true, currentCount + 1);
+    public Prices() {
+        for (ChainlinkSymbol symbol : ChainlinkSymbol.values()) {
+            states.put(symbol, SymbolState.empty());
         }
     }
 
-    // ========================================================================
-    // Private helpers for per-provider 60s average
-    // ========================================================================
+    public void updatePrice(ChainlinkSymbol symbol, BigDecimal price) {
+        if (symbol == null || price == null) return;
+        states.get(symbol).price().set(price);
+    }
 
-    private void updateProvider60sAverage(
-            Queue<BigDecimal> queue,
-            BigDecimal newPrice,
-            BigDecimal currentProviderAvg60s,
-            boolean alreadyIncluded60s,
-            IntSupplier current60sCountSupplier,
-            BiIntConsumer inclusion60sUpdater,
-            Supplier<BigDecimal> providerAvg60sSupplier,
-            Consumer<BigDecimal> providerAvg60sUpdater,
-            Supplier<BigDecimal> overallAvg60sSupplier,
-            Consumer<BigDecimal> overallAvg60sUpdater) {
+    public void updateAvg60sPrice(ChainlinkSymbol symbol, BigDecimal avg60sPrice) {
+        if (symbol == null || avg60sPrice == null) return;
+        states.get(symbol).avg60sPrice().set(avg60sPrice);
+    }
 
-        queue.add(newPrice);
+    public BigDecimal getPrice(ChainlinkSymbol symbol) {
+        return states.get(symbol).price().get();
+    }
 
-        BigDecimal removed = null;
+    public BigDecimal getAvg60sPrice(ChainlinkSymbol symbol) {
+        return states.get(symbol).avg60sPrice().get();
+    }
 
-        if (queue.size() > 60) {
-            removed = queue.remove();
-        }
-
-        int currentSize = queue.size();
-
-        BigDecimal newProviderAvg60s = null;
-
-        if (currentSize == 60) {
-
-            if (currentProviderAvg60s == null) {
-                BigDecimal sum = queue.stream()
-                        .reduce(BigDecimal.ZERO, BigDecimal::add);
-
-                newProviderAvg60s = sum.divide(
-                        BigDecimal.valueOf(60),
-                        2,
-                        RoundingMode.HALF_UP
-                );
-
-            } else {
-
-                if (removed != null) {
-                    newProviderAvg60s = currentProviderAvg60s
-                            .multiply(BigDecimal.valueOf(60))
-                            .add(newPrice)
-                            .subtract(removed)
-                            .divide(
-                                    BigDecimal.valueOf(60),
-                                    2,
-                                    RoundingMode.HALF_UP
-                            );
-                } else {
-                    newProviderAvg60s = currentProviderAvg60s;
-                }
-            }
-
-        } else if (currentSize < 60) {
-            return;
-        }
-
-        if (newProviderAvg60s != null) {
-
-            BigDecimal oldOverallAvg60s = overallAvg60sSupplier.get();
-            BigDecimal newOverallAvg60s;
-
-            int current60sCount = current60sCountSupplier.getAsInt();
-
-            if (alreadyIncluded60s) {
-
-                BigDecimal oldProviderAvg60s = currentProviderAvg60s;
-
-                if (current60sCount > 0) {
-                    newOverallAvg60s = oldOverallAvg60s
-                            .multiply(BigDecimal.valueOf(current60sCount))
-                            .add(newProviderAvg60s)
-                            .subtract(oldProviderAvg60s)
-                            .divide(
-                                    BigDecimal.valueOf(current60sCount),
-                                    2,
-                                    RoundingMode.HALF_UP
-                            );
-
-                    overallAvg60sUpdater.accept(newOverallAvg60s);
-                }
-
-            } else {
-
-                if (current60sCount == 0) {
-                    newOverallAvg60s = newProviderAvg60s;
-                } else {
-                    newOverallAvg60s = oldOverallAvg60s
-                            .multiply(BigDecimal.valueOf(current60sCount))
-                            .add(newProviderAvg60s)
-                            .divide(
-                                    BigDecimal.valueOf(current60sCount + 1),
-                                    2,
-                                    RoundingMode.HALF_UP
-                            );
-                }
-
-                overallAvg60sUpdater.accept(newOverallAvg60s);
-                inclusion60sUpdater.accept(true, current60sCount + 1);
-            }
-
-            providerAvg60sUpdater.accept(newProviderAvg60s);
+    public synchronized void recordSnapshot(ChainlinkSymbol symbol, LocalDateTime at) {
+        SymbolState state = states.get(symbol);
+        state.history().addLast(new PricePoint(at, state.price().get(), state.avg60sPrice().get()));
+        while (state.history().size() > HISTORY_SIZE) {
+            state.history().pollFirst();
         }
     }
 
-    // ========================================================================
-    // Functional interfaces
-    // ========================================================================
-
-    @FunctionalInterface
-    private interface IntSupplier {
-        int getAsInt();
-    }
-
-    @FunctionalInterface
-    private interface BiIntConsumer {
-        void accept(boolean flag, int count);
-    }
-
-    @FunctionalInterface
-    private interface Supplier<T> {
-        T get();
-    }
-
-    @FunctionalInterface
-    private interface Consumer<T> {
-        void accept(T t);
+    public synchronized List<PricePoint> getRecentHistory(ChainlinkSymbol symbol) {
+        return new ArrayList<>(states.get(symbol).history());
     }
 }

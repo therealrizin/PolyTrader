@@ -77,7 +77,7 @@ public class TradingDecisionService {
 
     private void evaluateAndMaybeBet() {
         try {
-            mockBetService.settleDueBets(prices);
+            mockBetService.settleDueBets();
 
             Optional<PolymarketMarketSnapshot> snapshotOpt = marketDataProvider.currentSnapshot();
             if (snapshotOpt.isEmpty()) {
@@ -127,8 +127,12 @@ public class TradingDecisionService {
 
             lastSkipKey.set(null);
 
+            BigDecimal currentLivePrice = prices.getPrice(SYMBOL);
+            BigDecimal currentTwapPrice = prices.getAvg60sPrice(SYMBOL);
+
             UpDownEvEstimate estimate = tradingEngine.estimateUpDown(
-                    currentPrice,
+                    currentLivePrice,
+                    currentTwapPrice,
                     snapshot.strikePriceUsd(),
                     (int) snapshot.secondsUntilClose(),
                     upMarketPrice,

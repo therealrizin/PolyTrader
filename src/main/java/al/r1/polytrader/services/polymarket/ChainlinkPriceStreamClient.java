@@ -163,11 +163,56 @@ public class ChainlinkPriceStreamClient {
         }
     }
 
-    private void handleRawPrice(ChainlinkSymbol symbol, JsonNode payload) {
+    private void handleRawPrice(
+            ChainlinkSymbol symbol,
+            JsonNode payload
+    ) {
         BigDecimal price = parseDecimal(payload.get("value"));
-        if (price == null) return;
-        prices.updatePrice(symbol, price);
-        log.trace("Chainlink raw price {}={}", symbol.getWire(), price);
+
+        if (price == null) {
+            return;
+        }
+
+        JsonNode timestampNode = payload.get("timestamp");
+
+        if (timestampNode == null || timestampNode.isNull()) {
+            log.warn(
+                    "Chainlink raw price missing payload.timestamp: symbol={} payload={}",
+                    symbol.getWire(),
+                    payload
+            );
+
+            /*
+             * We still update the current price, but do not put it into the
+             * historical resolution buffer because we don't know exactly
+             * when Polymarket observed it.
+             */
+            prices.updatePrice(symbol, price);
+            return;
+        }
+
+        long observedAtMillis = timestampNode.longValue();
+
+        /*
+         * Some APIs provide seconds while others provide milliseconds.
+         * Normalize defensively.
+         */
+        if (observedAtMillis > 0 && observedAtMillis < 100_000_000_000L) {
+            observedAtMillis *= 1000L;
+        }
+
+        prices.updatePrice(
+                symbol,
+                price,
+                observedAtMillis
+        );
+
+        log.trace(
+                "Chainlink raw price {}={} observedAt={}",
+                symbol.getWire(),
+                price,
+                Instant.ofEpochMilli(observedAtMillis)
+        );
     }
 
     private void handleTwapSixty(ChainlinkSymbol symbol, JsonNode payload) {

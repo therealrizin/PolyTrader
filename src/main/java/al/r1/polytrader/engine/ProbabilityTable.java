@@ -7,90 +7,165 @@ import org.springframework.stereotype.Component;
 public class ProbabilityTable {
 
     private static final int SECONDS_DIM = 301;
-    private static final int BUCKET_RANGE = 500;   // ±0.50% in 0.001% steps
-    private static final int CENTER = BUCKET_RANGE;
-    private static final int BUCKET_COUNT = 2 * BUCKET_RANGE + 1; // 1001 buckets
 
     /**
-     * Table representing how often a given price change occurs within a given
-     * amount of time, at 0.001% resolution.
+     * Price-change resolution:
      *
-     * Structure:
-     *
-     * Price change bucket
-     *            -0.500% | -0.499% | ... | 0.000% | ... | +0.499% | +0.500%
-     * --------------------------------
-     * 1s       |   ...   |  ...   | ... |  ...  | ... |  ...   |  ...
-     * ...
-     * 300s     |   ...   |  ...   | ... |  ...  | ... |  ...   |  ...
-     *
-     * Bucket semantics are cumulative toward zero:
-     * - A move of +0.333% increments buckets +0.001% through +0.333% (inclusive).
-     * - A move of -0.499% increments buckets -0.001% through -0.499% (inclusive).
-     * - Index 0 ("-0.500% or more") and index 1000 ("+0.500% or more") are
-     *   catch-alls for anything beyond the tracked range.
-     * - Index 500 (0.000%) only increments on an exact-zero change.
-     *
-     * probabilitiesTable[time][bucket] = weighted count of occurrences.
-     *
-     * The values are doubles because observations are weighted — newer
-     * observations can receive a higher weight than older ones.
+     * -0.500% ... 0.000% ... +0.500%
+     * in 0.001% increments.
      */
+    private static final int BUCKET_RANGE = 500;
+    private static final int CENTER = BUCKET_RANGE;
+    private static final int BUCKET_COUNT = 2 * BUCKET_RANGE + 1;
+
     @Getter
     private double[][] probabilitiesTable;
+
+    /**
+     * Number of independent observations added to the table.
+     */
     @Getter
     private int numberOfChecks;
+
+    /**
+     * Sum of weights of all independent observations.
+     *
+     * This is the correct denominator for probabilities.
+     *
+     * IMPORTANT:
+     * Do NOT calculate the denominator by summing a row of
+     * probabilitiesTable because each observation is inserted into
+     * multiple cumulative buckets.
+     */
     @Getter
     private double numberOfChecksWithWeight;
+
     private double weight;
 
     public ProbabilityTable() {
-        this.probabilitiesTable = new double[SECONDS_DIM][BUCKET_COUNT];
-        this.numberOfChecks = 0;
-        this.numberOfChecksWithWeight = 0;
-        this.weight = 1;
+        reset();
     }
 
-    public double getChance(double seconds, double chance) {
+    /**
+     * Returns the probability associated with the requested price-change
+     * threshold.
+     *
+     * The table stores cumulative directional probabilities:
+     *
+     * Positive threshold:
+     *
+     *     getChance(300, +0.100)
+     *
+     * means approximately:
+     *
+     *     P(price change >= +0.100% within 300 seconds)
+     *
+     * Negative threshold:
+     *
+     *     getChance(300, -0.100)
+     *
+     * means approximately:
+     *
+     *     P(price change <= -0.100% within 300 seconds)
+     *
+     * NOTE:
+     * For exactly 0.000%, the CENTER bucket only contains exact-zero
+     * observations. Therefore callers should not interpret
+     * getChance(..., 0.0) as P(change <= 0) or P(change >= 0).
+     */
+    public synchronized double getChance(double seconds, double changePercent) {
         int time = (int) Math.round(seconds);
 
         if (time < 1 || time > 300) {
             return 0.0;
         }
 
-        // 0.001% resolution, with 0.000% at index 500
-        int bucket = (int) Math.round(chance * 1000) + 500;
-
-        // Clamp to catch-all buckets
-        bucket = Math.max(0, Math.min(1000, bucket));
-
-        double value = probabilitiesTable[time][bucket];
-
-        // Total observations for this time
-        double total = 0.0;
-        for (double count : probabilitiesTable[time]) {
-            total += count;
-        }
-
-        if (total == 0.0) {
+        if (Double.isNaN(changePercent) || Double.isInfinite(changePercent)) {
             return 0.0;
         }
 
-        return value / total;
+        int bucket = mapPercentToBucket(changePercent);
+
+        double weightedCount = probabilitiesTable[time][bucket];
+
+        if (numberOfChecksWithWeight <= 0.0) {
+            return 0.0;
+        }
+
+        double probability = weightedCount / numberOfChecksWithWeight;
+
+        // Numerical protection.
+        return Math.max(0.0, Math.min(1.0, probability));
     }
 
-    public void updateProbabilitiesTable(int time, double changePure, boolean newRecord) {
+    /**
+     * Adds one observation to the cumulative probability table.
+     *
+     * changePure is a price ratio:
+     *
+     *     1.00100 = +0.100%
+     *     0.99900 = -0.100%
+     *
+     * For a positive move, all positive thresholds up to the observed move
+     * are incremented.
+     *
+     * Example:
+     *
+     *     observed move = +0.100%
+     *
+     * increments:
+     *
+     *     +0.001%
+     *     +0.002%
+     *     ...
+     *     +0.100%
+     *
+     * For a negative move, all negative thresholds down to the observed
+     * move are incremented.
+     */
+    public synchronized void updateProbabilitiesTable(
+            int time,
+            double changePure,
+            boolean newRecord
+    ) {
+        if (time < 1 || time > 300) {
+            return;
+        }
+
+        if (Double.isNaN(changePure)
+                || Double.isInfinite(changePure)
+                || changePure <= 0.0) {
+            return;
+        }
+
         int changeArea = mapChangeArea(changePure);
 
         if (changeArea > CENTER) {
+
+            // Positive move.
+            //
+            // Example +0.100%:
+            // increment +0.001% ... +0.100%
             for (int i = CENTER + 1; i <= changeArea; i++) {
                 probabilitiesTable[time][i] += weight;
             }
+
         } else if (changeArea < CENTER) {
+
+            // Negative move.
+            //
+            // Example -0.100%:
+            // increment -0.001% ... -0.100%
             for (int i = CENTER - 1; i >= changeArea; i--) {
                 probabilitiesTable[time][i] += weight;
             }
+
         } else {
+
+            // Exact zero movement.
+            //
+            // This is deliberately NOT added to the neighbouring
+            // cumulative buckets.
             probabilitiesTable[time][CENTER] += weight;
         }
 
@@ -99,27 +174,86 @@ public class ProbabilityTable {
         }
     }
 
-    public void updateNumberOfChecks() {
-        this.weight = Math.max((double) numberOfChecks / 1_000_000, 1);
+    /**
+     * Registers one independent observation and updates the weight used
+     * for future observations.
+     *
+     * The weighting scheme is preserved from the original implementation:
+     *
+     *     weight = max(numberOfChecks / 1,000,000, 1)
+     *
+     * Therefore older observations remain represented while newer
+     * observations gradually receive more weight.
+     */
+    public synchronized void updateNumberOfChecks() {
+        this.weight = Math.max(
+                (double) numberOfChecks / 1_000_000.0,
+                1.0
+        );
+
         this.numberOfChecksWithWeight += weight;
         this.numberOfChecks++;
     }
 
     /**
-     * Maps a price ratio (e.g. 1.00333 for +0.333%) to a bucket index in
-     * [0, 1000], where each step is 0.001% and index 500 is 0.000%.
+     * Converts a price ratio to a bucket.
+     *
+     * Examples:
+     *
+     *     1.00000 -> 500
+     *     1.00001 -> 501 (+0.001%)
+     *     1.00100 -> 600 (+0.100%)
+     *     0.99999 -> 499 (-0.001%)
+     *     0.99900 -> 400 (-0.100%)
      */
     public int mapChangeArea(double changePure) {
-        int changeUnits = (int) Math.round((changePure - 1) * 100000);
-        if (changeUnits <= -BUCKET_RANGE) return 0;
-        if (changeUnits >= BUCKET_RANGE) return BUCKET_COUNT - 1;
+        if (Double.isNaN(changePure) || Double.isInfinite(changePure)) {
+            return CENTER;
+        }
+
+        int changeUnits = (int) Math.round(
+                (changePure - 1.0) * 100_000.0
+        );
+
+        if (changeUnits <= -BUCKET_RANGE) {
+            return 0;
+        }
+
+        if (changeUnits >= BUCKET_RANGE) {
+            return BUCKET_COUNT - 1;
+        }
+
         return CENTER + changeUnits;
     }
 
-    public void reset() {
-        this.probabilitiesTable = new double[SECONDS_DIM][BUCKET_COUNT];
+    /**
+     * Converts a percentage value to the corresponding bucket.
+     *
+     * Example:
+     *
+     *     +0.100 -> bucket 600
+     *     +0.001 -> bucket 501
+     *      0.000 -> bucket 500
+     *     -0.001 -> bucket 499
+     *     -0.100 -> bucket 400
+     */
+    private int mapPercentToBucket(double changePercent) {
+        int bucket = (int) Math.round(changePercent * 1000.0);
+
+        bucket += CENTER;
+
+        return Math.max(
+                0,
+                Math.min(BUCKET_COUNT - 1, bucket)
+        );
+    }
+
+    public synchronized void reset() {
+        this.probabilitiesTable =
+                new double[SECONDS_DIM][BUCKET_COUNT];
+
         this.numberOfChecks = 0;
-        this.numberOfChecksWithWeight = 0;
-        this.weight = 1;
+        this.numberOfChecksWithWeight = 0.0;
+        this.weight = 1.0;
     }
 }

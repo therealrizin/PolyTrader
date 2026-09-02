@@ -5,6 +5,9 @@ services:
       context: .
       dockerfile: Dockerfile
 
+    ports:
+      - "8080:8080"
+
     env_file:
       - .env
 
@@ -21,7 +24,7 @@ services:
 
   polymarket-executor:
     build:
-      context: ./polymarket-executor
+      context: ./polymarket-executor-rs
       dockerfile: Dockerfile
 
     env_file:
@@ -36,6 +39,8 @@ services:
       POLYMARKET_API_KEY: ${POLYMARKET_API_KEY}
       POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET}
       POLYMARKET_API_PASSPHRASE: ${POLYMARKET_API_PASSPHRASE}
+
+      POLYMARKET_DEPOSIT_WALLET: ${POLYMARKET_DEPOSIT_WALLET}
 
       POLYMARKET_CHAIN_ID: ${POLYMARKET_CHAIN_ID}
       POLYGON_RPC_URL: ${POLYGON_RPC_URL}

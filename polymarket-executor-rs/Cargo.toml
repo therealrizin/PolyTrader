@@ -15,7 +15,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 alloy = { version = "1", features = ["full"] }
 
-polymarket-client-sdk-v2 = { git = "https://github.com/Polymarket/rs-clob-client-v2", package = "polymarket-client-sdk-v2" }
+# Enable the "clob" feature and add chrono
+polymarket_client_sdk_v2 = { git = "https://github.com/Polymarket/rs-clob-client-v2", features = ["clob"] }
 rust_decimal = "1"
 rust_decimal_macros = "1"
-
+chrono = "0.4"

@@ -76,7 +76,7 @@ public class MockBetService {
         );
 
         BigDecimal amount =
-                tradingProperties.mockBetAmount();
+                tradingProperties.betAmount();
 
         BigDecimal marketPrice =
                 BigDecimal.valueOf(marketPriceAtBet)

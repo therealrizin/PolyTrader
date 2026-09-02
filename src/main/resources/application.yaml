@@ -1,4 +1,3 @@
-# src/main/resources/application.yaml
 spring:
   application:
     name: PolyTrader
@@ -9,22 +8,28 @@ logging:
 
 services:
   polymarket:
-    wss_live_data_url: wss://ws-live-data.polymarket.com
-    gamma_base_url: https://gamma-api.polymarket.com
-    clob_wss_url: wss://ws-subscriptions-clob.polymarket.com/ws/market
-    market-wss-url: wss://api.polymarket.us/v1/ws/markets
+    wss_live_data_url: ${POLYMARKET_WSS_LIVE_DATA_URL:wss://ws-live-data.polymarket.com}
+    gamma_base_url: ${POLYMARKET_GAMMA_BASE_URL:https://gamma-api.polymarket.com}
+    clob_wss_url: ${POLYMARKET_CLOB_WSS_URL:wss://ws-subscriptions-clob.polymarket.com/ws/market}
+    market-wss-url: ${POLYMARKET_MARKET_WSS_URL:wss://api.polymarket.us/v1/ws/markets}
+
     api-key: ${POLYMARKET_API_KEY}
     api-key-address: ${POLYMARKET_API_KEY_ADDRESS}
-    market_refresh_seconds: 1
+
+    market_refresh_seconds: ${POLYMARKET_MARKET_REFRESH_SECONDS:1}
+
+    execution-url: ${POLYMARKET_EXECUTION_URL:http://polymarket-executor:8090}
+    execution-token: ${POLYMARKET_EXECUTOR_TOKEN}
+
   binance:
-    base_url: https://api.binance.com
-    wss_url: wss://stream.binance.com:9443/ws/
+    base_url: ${BINANCE_BASE_URL:https://api.binance.com}
+    wss_url: ${BINANCE_WSS_URL:wss://stream.binance.com:9443/ws/}
     api_key: ${BINANCE_API_KEY}
     secret: ${BINANCE_SECRET}
 
 trading:
-  mock: true
-  minimum-expected-ev: 0.25
-  minimum-win-chance: 0.20
-  taker-fee: 0.07
-  mock-bet-amount: 1
+  mock: ${TRADING_MOCK:true}
+  minimum-expected-ev: ${TRADING_MINIMUM_EXPECTED_EV:0.50}
+  minimum-win-chance: ${TRADING_MINIMUM_WIN_CHANCE:0.20}
+  taker-fee: ${TRADING_TAKER_FEE:0.07}
+  bet-amount: ${TRADING_BET_AMOUNT:1.00}

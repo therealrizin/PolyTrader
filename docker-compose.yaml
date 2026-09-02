@@ -1,0 +1,47 @@
+services:
+
+  polytrader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    env_file:
+      - .env
+
+    depends_on:
+      polymarket-executor:
+        condition: service_started
+
+    environment:
+      POLYMARKET_EXECUTION_URL: http://polymarket-executor:8090
+      POLYMARKET_EXECUTOR_TOKEN: ${POLYMARKET_EXECUTOR_TOKEN}
+
+    restart: unless-stopped
+
+
+  polymarket-executor:
+    build:
+      context: ./polymarket-executor
+      dockerfile: Dockerfile
+
+    env_file:
+      - .env
+
+    environment:
+      EXECUTOR_PORT: 8090
+
+      POLYMARKET_CLOB_URL: ${POLYMARKET_CLOB_URL}
+      POLYMARKET_PRIVATE_KEY: ${POLYMARKET_PRIVATE_KEY}
+
+      POLYMARKET_API_KEY: ${POLYMARKET_API_KEY}
+      POLYMARKET_API_SECRET: ${POLYMARKET_API_SECRET}
+      POLYMARKET_API_PASSPHRASE: ${POLYMARKET_API_PASSPHRASE}
+
+      POLYMARKET_CHAIN_ID: ${POLYMARKET_CHAIN_ID}
+      POLYGON_RPC_URL: ${POLYGON_RPC_URL}
+
+      POLYMARKET_TICK_SIZE: ${POLYMARKET_TICK_SIZE}
+
+      EXECUTOR_TOKEN: ${POLYMARKET_EXECUTOR_TOKEN}
+
+    restart: unless-stopped

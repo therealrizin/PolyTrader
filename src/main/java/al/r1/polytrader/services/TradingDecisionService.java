@@ -111,7 +111,7 @@ public class TradingDecisionService {
                 return;
             }
 
-            BigDecimal currentPrice = prices.getAvg60sPrice(SYMBOL);
+            BigDecimal currentPrice = prices.getPrice(SYMBOL);
             if (currentPrice == null || currentPrice.signum() == 0) {
                 logSkip("NO_CURRENT_PRICE", snapshot.slug(), "Chainlink 60s TWAP not available yet");
                 return;
@@ -178,7 +178,7 @@ public class TradingDecisionService {
 
             log.info("DECISION action=BET_PLACED slug={} side={} amount={} priceBetAt={} priceToAchieve={} " +
                             "marketPriceForSide={} winChance={} ev={}",
-                    snapshot.slug(), estimate.recommendedSide(), tradingProperties.mockBetAmount(),
+                    snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
                     currentPrice, snapshot.strikePriceUsd(), marketPriceForSide,
                     round(estimate.recommendedChance()), round(estimate.recommendedEv()));
         } catch (Exception e) {

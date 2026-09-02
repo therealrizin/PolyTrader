@@ -156,6 +156,11 @@ public class PolymarketMarketWebSocketClient implements PolymarketMarketResolver
         );
     }
 
+    /**
+     * Subscribe to a market. If the same slug is already subscribed, this method
+     * will NOT re‑resolve token IDs or tear down the connection – it simply
+     * updates the listener and (if the connection is broken) schedules a reconnect.
+     */
     public synchronized void subscribe(
             String slug,
             PriceListener newListener) {
@@ -168,81 +173,50 @@ public class PolymarketMarketWebSocketClient implements PolymarketMarketResolver
             start();
         }
 
+        // Always update the listener – it may be a new one.
         listener = newListener;
 
-        String previousSlug =
-                currentSlug.get();
+        String previousSlug = currentSlug.get();
+        WebSocketClient existingClient = currentClient.get();
 
-        WebSocketClient existingClient =
-                currentClient.get();
-
-        /*
-         * Same market and healthy connection:
-         * don't reconnect or re-resolve tokens.
-         */
-        if (slug.equals(previousSlug)
-                && upTokenId != null
-                && downTokenId != null
-                && existingClient != null
-                && existingClient.isOpen()) {
-
+        // Same market and we already have token IDs: no need to re‑resolve or reconnect immediately.
+        if (slug.equals(previousSlug) && upTokenId != null && downTokenId != null) {
+            // If the connection is not open, schedule a reconnect (if not already pending)
+            if (existingClient == null || !existingClient.isOpen()) {
+                if (!reconnectPending.get()) {
+                    scheduleReconnect();
+                }
+            }
             return;
         }
 
-        log.info(
-                "POLYMARKET WS subscribing to market slug={}",
-                slug
-        );
+        // Different market (or missing token IDs) – we must resolve and connect.
+        log.info("POLYMARKET WS subscribing to market slug={}", slug);
 
         try {
+            TokenIds tokenIds = getTokenIds(slug);
+            long generation = connectionGeneration.incrementAndGet();
 
-            TokenIds tokenIds =
-                    getTokenIds(slug);
-
-            long generation =
-                    connectionGeneration.incrementAndGet();
-
-            upTokenId =
-                    tokenIds.upTokenId();
-
-            downTokenId =
-                    tokenIds.downTokenId();
-
+            upTokenId = tokenIds.upTokenId();
+            downTokenId = tokenIds.downTokenId();
             currentSlug.set(slug);
 
-            /*
-             * CRITICAL:
-             *
-             * Never carry prices from the previous market into
-             * the new market.
-             */
+            // Clear old prices – they belong to a different market.
             bestBidBySide.clear();
             bestAskBySide.clear();
 
-            lastMarketDataMessageAtMillis =
-                    System.currentTimeMillis();
+            lastMarketDataMessageAtMillis = System.currentTimeMillis();
 
+            // Close any existing client before creating a new one.
             closeClient();
 
-            log.info(
-                    "POLYMARKET WS market resolved: " +
-                            "slug={} UP={} DOWN={} generation={}",
-                    slug,
-                    upTokenId,
-                    downTokenId,
-                    generation
-            );
+            log.info("POLYMARKET WS market resolved: slug={} UP={} DOWN={} generation={}",
+                    slug, upTokenId, downTokenId, generation);
 
             connect(generation);
 
         } catch (Exception e) {
-
-            log.error(
-                    "Failed to resolve Polymarket market: slug={}",
-                    slug,
-                    e
-            );
-
+            log.error("Failed to resolve Polymarket market: slug={}", slug, e);
             scheduleReconnect();
         }
     }

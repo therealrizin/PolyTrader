@@ -142,15 +142,14 @@ public class TradingDecisionService {
                     tradingProperties.takerFee()
             );
 
-            log.info("EVAL slug={} secondsUntilClose={} secondsSinceOpen={} currentPrice={} referencePrice(strike)={} " +
-                            "upMarketPrice={} downMarketPrice={} upChance={} downChance={} upEv={} downEv={} " +
-                            "recommendedSide={} recommendedChance={} recommendedEv={} thresholds(minWinChance={}, minEv={})",
+            log.info("******************************\nEVALUATION slug={}\nsecondsUntilClose={}\nsecondsSinceOpen={}\n\ncurrentPrice={}\nreferencePrice(strike)={}\n" +
+                            "upMarketPrice={}\ndownMarketPrice={}\nupChance={}\nupEv={}\ndownChance={}\ndownEv={}" +
+                            "\n\nrecommendedSide={}\nbestChance={}\nbestEv={}\n******************************)",
                     snapshot.slug(), snapshot.secondsUntilClose(), snapshot.secondsSinceOpen(), currentPrice, snapshot.strikePriceUsd(),
                     upMarketPrice, downMarketPrice,
-                    round(estimate.upChance()), round(estimate.downChance()),
-                    round(estimate.upEv()), round(estimate.downEv()),
-                    estimate.recommendedSide(), round(estimate.recommendedChance()), round(estimate.recommendedEv()),
-                    tradingProperties.minimumWinChance(), tradingProperties.minimumExpectedEv());
+                    round(estimate.upChance()), round(estimate.upEv()),
+                    round(estimate.downChance()), round(estimate.downEv()),
+                    estimate.recommendedSide(), round(estimate.recommendedChance()), round(estimate.recommendedEv()));
 
             if (estimate.recommendedChance() < tradingProperties.minimumWinChance()) {
                 log.info("DECISION skip reason=WIN_CHANCE_BELOW_THRESHOLD slug={} side={} winChance={} threshold={}",

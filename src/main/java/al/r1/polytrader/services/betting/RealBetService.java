@@ -93,8 +93,14 @@ public class RealBetService {
 
             String clientBetId = UUID.randomUUID().toString();
 
+            /*
+             * FIX: The order side must be "BUY" (or "SELL") for the specific token,
+             * not the market side. Here we are buying the chosen token.
+             */
+            String orderSide = "BUY";
+
             ExecutionOrderRequest request = new ExecutionOrderRequest(
-                    clientBetId, slug, tokenId, side.name(), price, size, amount, "FOK");
+                    clientBetId, slug, tokenId, orderSide, price, size, amount, "FOK");
 
             log.info("REAL BET submitting: id={} slug={} side={} tokenId={} price={} size={} amount={} " +
                             "EV={} winChance={} secondsUntilClose={}",

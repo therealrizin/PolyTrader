@@ -13,7 +13,7 @@ services:
 
     depends_on:
       polymarket-executor:
-        condition: service_started
+        condition: service_healthy   # Wait until healthcheck passes
 
     environment:
       POLYMARKET_EXECUTION_URL: http://polymarket-executor:8090
@@ -50,3 +50,10 @@ services:
       EXECUTOR_TOKEN: ${POLYMARKET_EXECUTOR_TOKEN}
 
     restart: unless-stopped
+
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8090"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

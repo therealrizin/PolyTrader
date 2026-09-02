@@ -15,7 +15,8 @@ use polymarket_client_sdk_v2::{
     auth::{state::Authenticated, Normal},
     clob::{
         types::{
-            Amount, OrderType as PolyOrderType, Side as PolySide, SignatureType,
+            Amount, OrderType as PolyOrderType, Side as PolySide,
+            SignatureType,
         },
         Client,
         Config,
@@ -25,7 +26,7 @@ use polymarket_client_sdk_v2::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 type AuthClient = Client<Authenticated<Normal>>;
@@ -90,10 +91,53 @@ async fn main() -> anyhow::Result<()> {
             .with_chain_id(Some(POLYGON)),
     );
 
-    info!("Signer address: {}", signer.address());
+    info!("Signer (EOA) address: {}", signer.address());
     info!("Polymarket CLOB host: {}", host);
-    info!("Deposit wallet: {}", deposit_wallet);
+    info!("Configured deposit wallet: {}", deposit_wallet);
 
+    // CORRECTNESS GUARD:
+    //
+    // A deposit wallet is a separately-deployed ERC-1967 proxy contract
+    // (per Polymarket's deposit-wallet flow, live since the V2 cutover).
+    // It is NOT, and can never legitimately be, the same address as the
+    // EOA that owns/signs for it. If these match, POLYMARKET_DEPOSIT_WALLET
+    // almost certainly has the EOA address pasted into it by mistake
+    // instead of the actual deployed deposit-wallet contract address.
+    //
+    // Continuing with a bad address here won't fail at startup (the SDK
+    // has no way to know it's wrong yet) -- it will fail later on order
+    // submission with something like:
+    //
+    //     {"error":"maker address not allowed, please use the deposit
+    //     wallet flow"}
+    //
+    // Fail fast instead, with the actual fix spelled out, rather than
+    // 400ing on every single order at trade time.
+    let deposit_wallet_addr = alloy::primitives::Address::from_str(&deposit_wallet)
+        .expect("POLYMARKET_DEPOSIT_WALLET is not a valid address");
+
+    if deposit_wallet_addr == signer.address() {
+        panic!(
+            "POLYMARKET_DEPOSIT_WALLET ({deposit_wallet}) is identical to the \
+             signer's EOA address ({}). A Polymarket deposit wallet is a \
+             separate deployed contract address and can never equal your \
+             EOA. Find your real deposit wallet address via: \
+             (1) the deposit address shown in your Polymarket account when \
+             logged in with this wallet, (2) the relayer's deposit-wallet \
+             derivation call (deriveDepositWalletAddress / \
+             get_expected_deposit_wallet), or (3) the WalletDeployed event \
+             from your onboarding flow. Then verify it's actually deployed \
+             with: GET https://relayer-v2.polymarket.com/deployed?address=<addr>&type=WALLET",
+            signer.address()
+        );
+    }
+
+    // This account requires the deposit-wallet flow (confirmed by the
+    // "please use the deposit wallet flow" rejection from the CLOB), so
+    // authenticate with the deposit wallet as funder and Poly1271 as the
+    // signature type. Orders are then made and signed as the deposit
+    // wallet (via ERC-7739-wrapped signatures verified through the wallet's
+    // isValidSignature()), not as the raw EOA.
     let client = Client::new(
         &host,
         Config::builder()
@@ -101,12 +145,12 @@ async fn main() -> anyhow::Result<()> {
             .build(),
     )?
     .authentication_builder(&*signer)
-    .funder(deposit_wallet.parse()?)
+    .funder(deposit_wallet_addr)
     .signature_type(SignatureType::Poly1271)
     .authenticate()
     .await?;
 
-    info!("Successfully authenticated with Polymarket");
+    info!("Successfully authenticated with Polymarket (deposit wallet flow, funder={})", deposit_wallet_addr);
 
     let state = AppState {
         client,
@@ -309,6 +353,15 @@ async fn place_order(
         Ok(response) => response,
         Err(e) => {
             error!("Polymarket order failed: {:?}", e);
+
+            if e.to_string().contains("maker address not allowed") {
+                warn!(
+                    "This error means POLYMARKET_DEPOSIT_WALLET does not point \
+                     at a real deployed deposit-wallet contract for this \
+                     account. Double-check the address (it must differ from \
+                     your EOA) and that it's actually deployed."
+                );
+            }
 
             return (
                 StatusCode::BAD_GATEWAY,

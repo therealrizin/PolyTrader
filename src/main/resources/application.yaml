@@ -29,7 +29,7 @@ services:
 
 trading:
   mock: ${TRADING_MOCK:true}
-  minimum-expected-ev: ${TRADING_MINIMUM_EXPECTED_EV:0.25}
+  minimum-expected-ev: ${TRADING_MINIMUM_EXPECTED_EV:0.40}
   minimum-win-chance: ${TRADING_MINIMUM_WIN_CHANCE:0.20}
   taker-fee: ${TRADING_TAKER_FEE:0.07}
   bet-amount: ${TRADING_BET_AMOUNT:1.00}

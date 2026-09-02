@@ -20,8 +20,8 @@ public class ExecutionWebClientConfig {
         return WebClient.builder()
                 .baseUrl(executionUrl)
                 .defaultHeader(
-                        "X-Executor-Token",
-                        executionToken
+                        "Authorization",
+                        "Bearer " + executionToken
                 )
                 .build();
     }

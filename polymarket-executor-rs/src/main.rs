@@ -12,7 +12,7 @@ use axum::{
 };
 use chrono::{TimeDelta, Utc};
 use polymarket_client_sdk_v2::{
-    auth::{state::Authenticated, Credentials, Normal, Uuid},
+    auth::{state::Authenticated, Normal},
     clob::{
         types::{
             Amount, OrderType as PolyOrderType, Side as PolySide, SignatureType,
@@ -38,7 +38,6 @@ struct AppState {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct OrderRequest {
     client_order_id: Option<String>,
     market_slug: Option<String>,
@@ -51,7 +50,6 @@ struct OrderRequest {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct OrderResponse {
     success: bool,
     order_id: Option<String>,
@@ -70,39 +68,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let host =
-        env::var("POLYMARKET_CLOB_URL")
-            .unwrap_or_else(|_| "https://clob.polymarket.com".to_string());
+    let host = env::var("POLYMARKET_CLOB_URL")
+        .unwrap_or_else(|_| "https://clob.polymarket.com".to_string());
 
-    let private_key =
-        env::var("POLYMARKET_PRIVATE_KEY")
-            .expect("POLYMARKET_PRIVATE_KEY is not configured");
+    let private_key = env::var("POLYMARKET_PRIVATE_KEY")
+        .expect("POLYMARKET_PRIVATE_KEY is not configured");
 
-    let api_key =
-        env::var("POLYMARKET_API_KEY")
-            .expect("POLYMARKET_API_KEY is not configured");
+    let deposit_wallet = env::var("POLYMARKET_DEPOSIT_WALLET")
+        .expect("POLYMARKET_DEPOSIT_WALLET is not configured");
 
-    let api_secret =
-        env::var("POLYMARKET_API_SECRET")
-            .expect("POLYMARKET_API_SECRET is not configured");
+    let executor_token = env::var("EXECUTOR_TOKEN")
+        .expect("EXECUTOR_TOKEN is not configured");
 
-    let api_passphrase =
-        env::var("POLYMARKET_API_PASSPHRASE")
-            .expect("POLYMARKET_API_PASSPHRASE is not configured");
-
-    let deposit_wallet =
-        env::var("POLYMARKET_DEPOSIT_WALLET")
-            .expect("POLYMARKET_DEPOSIT_WALLET is not configured");
-
-    let executor_token =
-        env::var("EXECUTOR_TOKEN")
-            .expect("EXECUTOR_TOKEN is not configured");
-
-    let port: u16 =
-        env::var("EXECUTOR_PORT")
-            .unwrap_or_else(|_| "8080".to_string())
-            .parse()
-            .expect("EXECUTOR_PORT must be a valid port");
+    let port: u16 = env::var("EXECUTOR_PORT")
+        .unwrap_or_else(|_| "8090".to_string())
+        .parse()
+        .expect("EXECUTOR_PORT must be a valid port");
 
     let signer = Arc::new(
         PrivateKeySigner::from_str(&private_key)?
@@ -110,12 +91,8 @@ async fn main() -> anyhow::Result<()> {
     );
 
     info!("Signer address: {}", signer.address());
-
-    let credentials = Credentials::new(
-        Uuid::parse_str(&api_key)?,
-        api_secret,
-        api_passphrase,
-    );
+    info!("Polymarket CLOB host: {}", host);
+    info!("Deposit wallet: {}", deposit_wallet);
 
     let client = Client::new(
         &host,
@@ -126,7 +103,6 @@ async fn main() -> anyhow::Result<()> {
     .authentication_builder(&*signer)
     .funder(deposit_wallet.parse()?)
     .signature_type(SignatureType::Poly1271)
-    .credentials(credentials)
     .authenticate()
     .await?;
 
@@ -174,6 +150,18 @@ async fn place_order(
         return bad_request("Unauthorized");
     }
 
+    info!(
+        "Received order request: client_order_id={:?}, market_slug={:?}, token_id={}, side={}, price={}, size={}, amount_usdc={:?}, order_type={:?}",
+        req.client_order_id,
+        req.market_slug,
+        req.token_id,
+        req.side,
+        req.price,
+        req.size,
+        req.amount_usdc,
+        req.order_type
+    );
+
     let token_id = match U256::from_str(&req.token_id) {
         Ok(token_id) => token_id,
         Err(_) => {
@@ -205,11 +193,8 @@ async fn place_order(
         }
     };
 
-    // Determine if this is a GTD order *before* moving `order_type`.
     let is_gtd = matches!(order_type, PolyOrderType::GTD);
 
-    // Build the order. Clone `order_type` when passing it to the builder
-    // so that the original can be used later for logging.
     let order = match order_type {
         PolyOrderType::FOK | PolyOrderType::FAK => {
             let amount_usdc = match req.amount_usdc.as_deref() {
@@ -245,7 +230,7 @@ async fn place_order(
                 .token_id(token_id)
                 .amount(amount)
                 .side(side)
-                .order_type(order_type.clone()) // clone to avoid move
+                .order_type(order_type.clone())
                 .build()
                 .await
         }
@@ -254,18 +239,14 @@ async fn place_order(
             let price_decimal = match Decimal::try_from(req.price.as_str()) {
                 Ok(value) => value,
                 Err(e) => {
-                    return bad_request(&format!(
-                        "Invalid price: {e}"
-                    ));
+                    return bad_request(&format!("Invalid price: {e}"));
                 }
             };
 
             let size_decimal = match Decimal::try_from(req.size.as_str()) {
                 Ok(value) => value,
                 Err(e) => {
-                    return bad_request(&format!(
-                        "Invalid size: {e}"
-                    ));
+                    return bad_request(&format!("Invalid size: {e}"));
                 }
             };
 
@@ -276,7 +257,7 @@ async fn place_order(
                 .price(price_decimal)
                 .size(size_decimal)
                 .side(side)
-                .order_type(order_type.clone()); // clone to avoid move
+                .order_type(order_type.clone());
 
             if is_gtd {
                 builder =
@@ -286,14 +267,15 @@ async fn place_order(
             builder.build().await
         }
 
-        // Catch-all for any other variants (including Unknown, which we never construct).
-        _ => return bad_request("Unsupported order_type"),
+        _ => {
+            return bad_request("Unsupported order_type");
+        }
     };
 
     let order = match order {
         Ok(order) => order,
         Err(e) => {
-            error!("Failed to build order: {}", e);
+            error!("Failed to build order: {:?}", e);
 
             return internal_error(&format!(
                 "Failed to build order: {e}"
@@ -303,14 +285,14 @@ async fn place_order(
 
     info!(
         "Signing order: token_id={}, side={:?}, order_type={:?}",
-        req.token_id, side, order_type // now `order_type` is still usable
+        req.token_id, side, order_type
     );
 
     let signed_order =
         match state.client.sign(&*state.signer, order).await {
             Ok(order) => order,
             Err(e) => {
-                error!("Failed to sign order: {}", e);
+                error!("Failed to sign order: {:?}", e);
 
                 return internal_error(&format!(
                     "Failed to sign order: {e}"
@@ -323,44 +305,46 @@ async fn place_order(
         req.client_order_id, req.market_slug
     );
 
-    let response =
-        match state.client.post_order(signed_order).await {
-            Ok(response) => response,
-            Err(e) => {
-                error!("Polymarket order failed: {}", e);
+    let response = match state.client.post_order(signed_order).await {
+        Ok(response) => response,
+        Err(e) => {
+            error!("Polymarket order failed: {:?}", e);
 
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(OrderResponse {
-                        success: false,
-                        order_id: None,
-                        status: None,
-                        making_amount: None,
-                        taking_amount: None,
-                        error: Some(e.to_string()),
-                    }),
-                );
-            }
-        };
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(OrderResponse {
+                    success: false,
+                    order_id: None,
+                    status: None,
+                    making_amount: None,
+                    taking_amount: None,
+                    error: Some(e.to_string()),
+                }),
+            );
+        }
+    };
 
-    info!("Polymarket order submitted successfully");
+    info!(
+        "Polymarket order submitted successfully: order_id={}, status={:?}, success={}",
+        response.order_id,
+        response.status,
+        response.success
+    );
 
     (
         StatusCode::OK,
         Json(OrderResponse {
-            success: true,
-            order_id: Some(response.order_id.to_string()),
+            success: response.success,
+            order_id: Some(response.order_id),
             status: Some(response.status.to_string()),
             making_amount: Some(response.making_amount.to_string()),
             taking_amount: Some(response.taking_amount.to_string()),
-            error: None,
+            error: response.error_msg,
         }),
     )
 }
 
-fn bad_request(
-    error: &str,
-) -> (StatusCode, Json<OrderResponse>) {
+fn bad_request(error: &str) -> (StatusCode, Json<OrderResponse>) {
     (
         StatusCode::BAD_REQUEST,
         Json(OrderResponse {
@@ -374,9 +358,7 @@ fn bad_request(
     )
 }
 
-fn internal_error(
-    error: &str,
-) -> (StatusCode, Json<OrderResponse>) {
+fn internal_error(error: &str) -> (StatusCode, Json<OrderResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(OrderResponse {

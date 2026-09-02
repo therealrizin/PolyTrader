@@ -166,6 +166,13 @@ public class TradingDecisionService {
 
             double marketPriceForSide = estimate.recommendedSide() == MarketSide.UP ? upMarketPrice : downMarketPrice;
 
+            if (marketPriceForSide < 0.1) {
+                log.info("DECISION skip reason=MARKET_PRICE_TOO_LOW slug={} side={} marketPrice={}",
+                        snapshot.slug(), estimate.recommendedSide(),
+                        marketPriceForSide);
+                return;
+            }
+
             if (tradingProperties.mock()) {
                 mockBetService.placeMockBet(
                         snapshot.slug(), estimate.recommendedSide(), currentPrice, snapshot.strikePriceUsd(),

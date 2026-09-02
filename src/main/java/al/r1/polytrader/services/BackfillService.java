@@ -44,7 +44,7 @@ public class BackfillService {
 
         long end = System.currentTimeMillis();
         //TODO change date later
-        long start = end - Duration.ofDays(4).toMillis();
+        long start = end - Duration.ofDays(1).toMillis();
 
         long current = start;
         List<BinanceKline> candles = new ArrayList<>();

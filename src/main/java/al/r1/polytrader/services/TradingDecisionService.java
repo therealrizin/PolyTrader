@@ -5,6 +5,7 @@ import al.r1.polytrader.engine.TradingEngine;
 import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.engine.model.UpDownEvEstimate;
 import al.r1.polytrader.services.betting.MockBetService;
+import al.r1.polytrader.services.betting.RealBetService;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.PolymarketDataProvider;
@@ -32,6 +33,7 @@ public class TradingDecisionService {
     private final TradingEngine tradingEngine;
     private final PolymarketDataProvider marketDataProvider;
     private final MockBetService mockBetService;
+    private final RealBetService realBetService;
     private final TradingProperties tradingProperties;
     private final TaskScheduler liveDataTaskScheduler;
 
@@ -40,19 +42,16 @@ public class TradingDecisionService {
     private final AtomicReference<String> lastSkipKey = new AtomicReference<>();
     private final AtomicReference<Instant> lastSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
 
-    public TradingDecisionService(Prices prices,
-                                  TradingEngine tradingEngine,
-                                  PolymarketDataProvider marketDataProvider,
-                                  MockBetService mockBetService,
-                                  TradingProperties tradingProperties,
-                                  TaskScheduler liveDataTaskScheduler) {
+    public TradingDecisionService(Prices prices, TradingEngine tradingEngine, PolymarketDataProvider marketDataProvider, MockBetService mockBetService, RealBetService realBetService, TradingProperties tradingProperties, TaskScheduler liveDataTaskScheduler) {
         this.prices = prices;
         this.tradingEngine = tradingEngine;
         this.marketDataProvider = marketDataProvider;
         this.mockBetService = mockBetService;
+        this.realBetService = realBetService;
         this.tradingProperties = tradingProperties;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
     }
+
 
     public void start() {
         ScheduledFuture<?> future = liveDataTaskScheduler.scheduleAtFixedRate(
@@ -106,7 +105,10 @@ public class TradingDecisionService {
                 return;
             }
 
-            if (mockBetService.hasOpenBetFor(snapshot.slug())) {
+            boolean alreadyOpen = tradingProperties.mock()
+                    ? mockBetService.hasOpenBetFor(snapshot.slug())
+                    : realBetService.hasOpenBetFor(snapshot.slug());
+            if (alreadyOpen) {
                 logSkip("BET_ALREADY_OPEN", snapshot.slug(), "one bet per window already placed");
                 return;
             }
@@ -165,16 +167,28 @@ public class TradingDecisionService {
 
             double marketPriceForSide = estimate.recommendedSide() == MarketSide.UP ? upMarketPrice : downMarketPrice;
 
-            mockBetService.placeMockBet(
-                    snapshot.slug(),
-                    estimate.recommendedSide(),
-                    currentPrice,
-                    snapshot.strikePriceUsd(),
-                    marketPriceForSide,
-                    estimate.recommendedEv(),
-                    estimate.recommendedChance(),
-                    snapshot.secondsUntilClose()
-            );
+            if (tradingProperties.mock()) {
+                mockBetService.placeMockBet(
+                        snapshot.slug(), estimate.recommendedSide(), currentPrice, snapshot.strikePriceUsd(),
+                        marketPriceForSide, estimate.recommendedEv(), estimate.recommendedChance(),
+                        snapshot.secondsUntilClose());
+
+                log.info("DECISION action=BET_PLACED (MOCK) slug={} side={} amount={} winChance={} ev={}",
+                        snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
+                        round(estimate.recommendedChance()), round(estimate.recommendedEv()));
+            } else {
+                try {
+                    realBetService.placeRealBet(
+                            snapshot, estimate.recommendedSide(), estimate.recommendedEv(), estimate.recommendedChance());
+
+                    log.info("DECISION action=BET_PLACED (REAL) slug={} side={} amount={} winChance={} ev={}",
+                            snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
+                            round(estimate.recommendedChance()), round(estimate.recommendedEv()));
+                } catch (Exception e) {
+                    log.error("DECISION action=BET_FAILED (REAL) slug={} side={}",
+                            snapshot.slug(), estimate.recommendedSide(), e);
+                }
+            }
 
             log.info("DECISION action=BET_PLACED slug={} side={} amount={} priceBetAt={} priceToAchieve={} " +
                             "marketPriceForSide={} winChance={} ev={}",

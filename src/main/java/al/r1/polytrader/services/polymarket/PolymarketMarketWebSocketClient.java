@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -30,7 +31,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
 @Service
-public class PolymarketMarketWebSocketClient {
+public class PolymarketMarketWebSocketClient implements PolymarketMarketResolver {
 
     private static final Duration RECONNECT_DELAY =
             Duration.ofSeconds(3);
@@ -83,6 +84,19 @@ public class PolymarketMarketWebSocketClient {
                 BigDecimal bestBid,
                 BigDecimal bestAsk
         );
+    }
+
+    @Override
+    public Optional<ResolvedMarket> resolveCurrentMarket() {
+        String slug = currentSlug.get();
+        String up = upTokenId;
+        String down = downTokenId;
+
+        if (slug == null || up == null || down == null) {
+            return Optional.empty();
+        }
+
+        return Optional.of(new ResolvedMarket(slug, up, down));
     }
 
     public PolymarketMarketWebSocketClient(

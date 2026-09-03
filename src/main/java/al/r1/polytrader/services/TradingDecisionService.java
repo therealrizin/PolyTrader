@@ -2,8 +2,8 @@ package al.r1.polytrader.services;
 
 import al.r1.polytrader.config.model.TradingProperties;
 import al.r1.polytrader.engine.TradingEngine;
-import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.engine.model.EvEstimate;
+import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.services.betting.MockBetService;
 import al.r1.polytrader.services.betting.RealBetService;
 import al.r1.polytrader.services.betting.model.MockBet;
@@ -29,8 +29,12 @@ import java.util.concurrent.atomic.AtomicReference;
 public class TradingDecisionService {
 
     private static final int MIN_SECONDS_TO_ACT = 10;
-    private static final Duration SKIP_HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
-    private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
+
+    private static final Duration SKIP_HEARTBEAT_INTERVAL =
+            Duration.ofSeconds(30);
+
+    private static final ChainlinkSymbol SYMBOL =
+            ChainlinkSymbol.BTC_USD;
 
     private final Prices prices;
     private final TradingEngine tradingEngine;
@@ -40,17 +44,30 @@ public class TradingDecisionService {
     private final TradingProperties tradingProperties;
     private final TaskScheduler liveDataTaskScheduler;
 
-    private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
+    private final AtomicReference<ScheduledFuture<?>> scheduledTask =
+            new AtomicReference<>();
 
-    // Buy-side skip logging state
-    private final AtomicReference<String> lastSkipKey = new AtomicReference<>();
-    private final AtomicReference<Instant> lastSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
+    private final AtomicReference<String> lastSkipKey =
+            new AtomicReference<>();
 
-    // Sell-side skip logging state
-    private final AtomicReference<String> lastSellSkipKey = new AtomicReference<>();
-    private final AtomicReference<Instant> lastSellSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
+    private final AtomicReference<Instant> lastSkipHeartbeatAt =
+            new AtomicReference<>(Instant.EPOCH);
 
-    public TradingDecisionService(Prices prices, TradingEngine tradingEngine, PolymarketDataProvider marketDataProvider, MockBetService mockBetService, RealBetService realBetService, TradingProperties tradingProperties, TaskScheduler liveDataTaskScheduler) {
+    private final AtomicReference<String> lastSellSkipKey =
+            new AtomicReference<>();
+
+    private final AtomicReference<Instant> lastSellSkipHeartbeatAt =
+            new AtomicReference<>(Instant.EPOCH);
+
+    public TradingDecisionService(
+            Prices prices,
+            TradingEngine tradingEngine,
+            PolymarketDataProvider marketDataProvider,
+            MockBetService mockBetService,
+            RealBetService realBetService,
+            TradingProperties tradingProperties,
+            TaskScheduler liveDataTaskScheduler) {
+
         this.prices = prices;
         this.tradingEngine = tradingEngine;
         this.marketDataProvider = marketDataProvider;
@@ -60,207 +77,521 @@ public class TradingDecisionService {
         this.liveDataTaskScheduler = liveDataTaskScheduler;
     }
 
+    /**
+     * Starts only the periodic SELL loop.
+     *
+     * BUY decisions are now triggered directly by fresh Chainlink
+     * price updates in ChainlinkPriceStreamClient.
+     */
     public void start() {
-        ScheduledFuture<?> future = liveDataTaskScheduler.scheduleAtFixedRate(
-                this::evaluateAndMaybeBet,
-                Instant.now().plusSeconds(1),
-                Duration.ofSeconds(1)
-        );
+
+        ScheduledFuture<?> future =
+                liveDataTaskScheduler.scheduleAtFixedRate(
+                        this::evaluateSellOnly,
+                        Instant.now().plusSeconds(1),
+                        Duration.ofSeconds(1)
+                );
+
         scheduledTask.set(future);
-        log.info("Trading decision loop started (mock={}, minEv={}, minWinChance={}, takerFee={}, minSecondsSinceOpen={})",
-                tradingProperties.mock(), tradingProperties.minimumExpectedEv(),
-                tradingProperties.minimumWinChance(), tradingProperties.takerFee(),
-                tradingProperties.minimumSecondsSinceOpen());
+
+        log.info(
+                "Trading sell loop started (mock={}, minEv={}, minWinChance={}, takerFee={}, minSecondsSinceOpen={})",
+                tradingProperties.mock(),
+                tradingProperties.minimumExpectedEv(),
+                tradingProperties.minimumWinChance(),
+                tradingProperties.takerFee(),
+                tradingProperties.minimumSecondsSinceOpen()
+        );
     }
 
     public void stop() {
-        ScheduledFuture<?> future = scheduledTask.getAndSet(null);
+
+        ScheduledFuture<?> future =
+                scheduledTask.getAndSet(null);
+
         if (future != null) {
             future.cancel(false);
-            log.info("Trading decision loop stopped");
+
+            log.info(
+                    "Trading decision loop stopped"
+            );
         }
     }
 
-    private void evaluateAndMaybeBet() {
+    /**
+     * Called immediately after a fresh Chainlink BTC price update.
+     *
+     * This is now the real-time BUY trigger.
+     */
+    public void onChainlinkPriceUpdate() {
+
         try {
-            mockBetService.settleDueBets();
+            evaluateBuyImmediately();
+        } catch (Exception e) {
+            log.error(
+                    "Error during immediate Chainlink BUY evaluation",
+                    e
+            );
+        }
+    }
 
-            Optional<PolymarketMarketSnapshot> snapshotOpt = marketDataProvider.currentSnapshot();
-            if (snapshotOpt.isEmpty()) {
-                logSkip("NO_SNAPSHOT", null, "no open Polymarket market snapshot yet");
-                return;
-            }
+    private void evaluateBuyImmediately() {
 
-            PolymarketMarketSnapshot snapshot = snapshotOpt.get();
+        Optional<PolymarketMarketSnapshot> snapshotOpt =
+                marketDataProvider.currentSnapshot();
 
-            // ------------------------------------------------------------
-            // SELL LOGIC – multi‑strategy for mock, single for real
-            // ------------------------------------------------------------
-            if (tradingProperties.mock()) {
-                List<MockBet> soldBets = mockBetService.evaluateSellForAllStrategies(snapshot);
-                if (!soldBets.isEmpty()) {
-                    for (MockBet bet : soldBets) {
-                        log.info("DECISION action=SOLD (MOCK) strategy={} slug={} side={} boughtAt={} soldAt={} profitLoss={}",
-                                bet.strategyId(), bet.marketSlug(), bet.side(),
-                                bet.marketPriceAtBet(), bet.priceAtResolution(), bet.profitLoss());
-                    }
-                } else {
-                    logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "no mock strategy met sell EV");
-                }
-            } else {
-                // Real mode: single bet handling
-                if (!realBetService.hasOpenBetFor(snapshot.slug())) {
-                    logSellSkip("NO_OPEN_BET", snapshot.slug(), "real mode");
-                } else {
-                    Optional<RealBet> sold = realBetService.sellOpenPosition(snapshot);
-                    sold.ifPresentOrElse(
-                            bet -> log.info("DECISION action=SOLD (REAL) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
-                                    bet.marketSlug(), bet.side(), bet.price(),
-                                    bet.soldPrice(), bet.profitLoss()),
-                            () -> logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "real sell check returned empty")
-                    );
-                }
-            }
+        if (snapshotOpt.isEmpty()) {
+            logSkip(
+                    "NO_SNAPSHOT",
+                    null,
+                    "no open Polymarket market snapshot yet"
+            );
+            return;
+        }
 
-            // ------------------------------------------------------------
-            // COMMON ENTRY PRE‑CHECKS (time, price, market data)
-            // ------------------------------------------------------------
-            if (snapshot.secondsSinceOpen() < tradingProperties.minimumSecondsSinceOpen()) {
-                logSkip("TOO_SOON_AFTER_OPEN", snapshot.slug(),
-                        "secondsSinceOpen=" + snapshot.secondsSinceOpen()
-                                + " minimumSecondsSinceOpen=" + tradingProperties.minimumSecondsSinceOpen());
-                return;
-            }
+        PolymarketMarketSnapshot snapshot =
+                snapshotOpt.get();
 
-            if (snapshot.secondsUntilClose() < MIN_SECONDS_TO_ACT) {
-                logSkip("TOO_CLOSE_TO_CLOSE", snapshot.slug(),
-                        "secondsUntilClose=" + snapshot.secondsUntilClose() + " minSecondsToAct=" + MIN_SECONDS_TO_ACT);
-                return;
-            }
+        if (snapshot.secondsSinceOpen()
+                < tradingProperties.minimumSecondsSinceOpen()) {
 
-            if (snapshot.secondsSinceOpen() < MIN_SECONDS_TO_ACT) {
-                logSkip("TOO_EARLY_TO_BET", snapshot.slug(),
-                        "secondsSinceOpen=" + snapshot.secondsSinceOpen() + " minSecondsToAct=" + MIN_SECONDS_TO_ACT);
-                return;
-            }
-
-            // For real mode, we block if there's already an open real bet.
-            // For mock mode, we allow multiple strategies to bet on the same slug,
-            // so we skip this check only for mock.
-            if (!tradingProperties.mock() && realBetService.hasOpenBetFor(snapshot.slug())) {
-                logSkip("BET_ALREADY_OPEN", snapshot.slug(), "one real bet per window already placed");
-                return;
-            }
-
-            BigDecimal currentPrice = prices.getPrice(SYMBOL);
-            if (currentPrice == null || currentPrice.signum() == 0) {
-                logSkip("NO_CURRENT_PRICE", snapshot.slug(), "Chainlink 60s TWAP not available yet");
-                return;
-            }
-
-            if (snapshot.upPrice() == null || snapshot.downPrice() == null) {
-                logSkip("MISSING_MARKET_PRICES", snapshot.slug(),
-                        "upPrice=" + snapshot.upPrice() + " downPrice=" + snapshot.downPrice());
-                return;
-            }
-            double upMarketPrice = snapshot.upPrice().doubleValue();
-            double downMarketPrice = snapshot.downPrice().doubleValue();
-
-            lastSkipKey.set(null);
-
-            BigDecimal currentLivePrice = prices.getPrice(SYMBOL);
-            BigDecimal currentTwapPrice = prices.getAvg60sPrice(SYMBOL);
-
-            EvEstimate estimate = tradingEngine.estimateUpDown(
-                    currentLivePrice,
-                    currentTwapPrice,
-                    snapshot.strikePriceUsd(),
-                    (int) snapshot.secondsUntilClose(),
-                    upMarketPrice,
-                    downMarketPrice,
-                    tradingProperties.takerFee()
+            logSkip(
+                    "TOO_SOON_AFTER_OPEN",
+                    snapshot.slug(),
+                    "secondsSinceOpen="
+                            + snapshot.secondsSinceOpen()
+                            + " minimumSecondsSinceOpen="
+                            + tradingProperties.minimumSecondsSinceOpen()
             );
 
-            log.info("******************************\nEVALUATION slug={}\nsecondsUntilClose={}\nsecondsSinceOpen={}\n\ncurrentPrice={}\nreferencePrice(strike)={}\n" +
-                            "upMarketPrice={}\ndownMarketPrice={}\nupChance={}\nupEv={}\ndownChance={}\ndownEv={}" +
-                            "\n\nrecommendedSide={}\nbestChance={}\nbestEv={}\n******************************)",
-                    snapshot.slug(), snapshot.secondsUntilClose(), snapshot.secondsSinceOpen(), currentPrice, snapshot.strikePriceUsd(),
-                    upMarketPrice, downMarketPrice,
-                    round(estimate.upChance()), round(estimate.upEv()),
-                    round(estimate.downChance()), round(estimate.downEv()),
-                    estimate.recommendedSide(), round(estimate.recommendedChance()), round(estimate.recommendedEv()));
+            return;
+        }
 
-            if (estimate.recommendedChance() < tradingProperties.minimumWinChance()) {
-                log.info("DECISION skip reason=WIN_CHANCE_BELOW_THRESHOLD slug={} side={} winChance={} threshold={}",
-                        snapshot.slug(), estimate.recommendedSide(),
-                        round(estimate.recommendedChance()), tradingProperties.minimumWinChance());
-                return;
-            }
+        if (snapshot.secondsUntilClose()
+                < MIN_SECONDS_TO_ACT) {
 
-            // Dynamic EV threshold based on win chance
-            double effectiveEvThreshold = getEffectiveEvThreshold(estimate.recommendedChance());
-            if (estimate.recommendedEv() < effectiveEvThreshold) {
-                log.info("DECISION skip reason=EV_BELOW_THRESHOLD slug={} side={} ev={} threshold={} (winChance={})",
-                        snapshot.slug(), estimate.recommendedSide(),
-                        round(estimate.recommendedEv()), round(effectiveEvThreshold),
-                        round(estimate.recommendedChance()));
-                return;
-            }
+            logSkip(
+                    "TOO_CLOSE_TO_CLOSE",
+                    snapshot.slug(),
+                    "secondsUntilClose="
+                            + snapshot.secondsUntilClose()
+                            + " minSecondsToAct="
+                            + MIN_SECONDS_TO_ACT
+            );
 
-            double marketPriceForSide = estimate.recommendedSide() == MarketSide.UP ? upMarketPrice : downMarketPrice;
+            return;
+        }
 
-            // ------------------------------------------------------------
-            // ENTRY LOGIC – multi‑strategy for mock, single for real
-            // ------------------------------------------------------------
-            if (tradingProperties.mock()) {
-                List<MockBet> placed = mockBetService.placeBetsForAllStrategies(
-                        snapshot,
-                        estimate.recommendedSide(),
-                        estimate.recommendedEv(),
-                        estimate.recommendedChance(),
-                        BigDecimal.valueOf(marketPriceForSide),
-                        currentPrice,
+        if (snapshot.secondsSinceOpen()
+                < MIN_SECONDS_TO_ACT) {
+
+            logSkip(
+                    "TOO_EARLY_TO_BET",
+                    snapshot.slug(),
+                    "secondsSinceOpen="
+                            + snapshot.secondsSinceOpen()
+                            + " minSecondsToAct="
+                            + MIN_SECONDS_TO_ACT
+            );
+
+            return;
+        }
+
+        /*
+         * Real mode:
+         *
+         * One position per market.
+         *
+         * This means once either UP or DOWN FOK fills, we stop
+         * submitting further buys for this market.
+         */
+        if (!tradingProperties.mock()
+                && realBetService.hasOpenBetFor(snapshot.slug())) {
+
+            logSkip(
+                    "BET_ALREADY_OPEN",
+                    snapshot.slug(),
+                    "one real position per market already filled"
+            );
+
+            return;
+        }
+
+        BigDecimal currentLivePrice =
+                prices.getPrice(SYMBOL);
+
+        BigDecimal currentTwapPrice =
+                prices.getAvg60sPrice(SYMBOL);
+
+        if (currentLivePrice == null
+                || currentLivePrice.signum() <= 0) {
+
+            logSkip(
+                    "NO_CURRENT_PRICE",
+                    snapshot.slug(),
+                    "Chainlink live price unavailable"
+            );
+
+            return;
+        }
+
+        if (currentTwapPrice == null
+                || currentTwapPrice.signum() <= 0) {
+
+            logSkip(
+                    "NO_TWAP",
+                    snapshot.slug(),
+                    "Chainlink 60s TWAP unavailable"
+            );
+
+            return;
+        }
+
+        if (snapshot.strikePriceUsd() == null
+                || snapshot.strikePriceUsd().signum() <= 0) {
+
+            logSkip(
+                    "NO_STRIKE",
+                    snapshot.slug(),
+                    "market strike price unavailable"
+            );
+
+            return;
+        }
+
+        if (!prices.isPriceFresh(SYMBOL)) {
+
+            logSkip(
+                    "STALE_CHAINLINK_PRICE",
+                    snapshot.slug(),
+                    "ageMs="
+                            + prices.getPriceAgeMillis(SYMBOL)
+            );
+
+            return;
+        }
+
+        double currentUpPrice =
+                snapshot.upPrice() != null
+                        ? snapshot.upPrice().doubleValue()
+                        : 0.5;
+
+        double currentDownPrice =
+                snapshot.downPrice() != null
+                        ? snapshot.downPrice().doubleValue()
+                        : 0.5;
+
+        /*
+         * We still use the CURRENT market prices when estimating
+         * the current EV for logging/comparison.
+         *
+         * But we DO NOT use them as the buy order price.
+         */
+        EvEstimate estimate =
+                tradingEngine.estimateUpDown(
+                        currentLivePrice,
+                        currentTwapPrice,
                         snapshot.strikePriceUsd(),
-                        snapshot.secondsUntilClose()
+                        (int) snapshot.secondsUntilClose(),
+                        currentUpPrice,
+                        currentDownPrice,
+                        tradingProperties.takerFee()
                 );
 
-                if (!placed.isEmpty()) {
-                    for (MockBet bet : placed) {
-                        log.info("DECISION action=BET_PLACED (MOCK) strategy={} slug={} side={} amount={} winChance={} ev={} effectiveThreshold={}",
-                                bet.strategyId(), snapshot.slug(), estimate.recommendedSide(),
-                                tradingProperties.betAmount(),
-                                round(estimate.recommendedChance()), round(estimate.recommendedEv()),
-                                round(effectiveEvThreshold));
-                    }
-                } else {
-                    log.info("DECISION skip reason=NO_STRATEGY_QUALIFIED slug={} side={} ev={} winChance={}",
-                            snapshot.slug(), estimate.recommendedSide(),
-                            round(estimate.recommendedEv()), round(estimate.recommendedChance()));
-                }
-            } else {
-                // Real mode: single bet
-                try {
-                    realBetService.placeRealBet(
-                            snapshot, estimate.recommendedSide(), estimate.recommendedEv(), estimate.recommendedChance());
+        double upThreshold =
+                getEffectiveEvThreshold(
+                        estimate.upChance()
+                );
 
-                    log.info("DECISION action=BET_PLACED (REAL) slug={} side={} amount={} winChance={} ev={} effectiveThreshold={}",
-                            snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
-                            round(estimate.recommendedChance()), round(estimate.recommendedEv()),
-                            round(effectiveEvThreshold));
-                } catch (Exception e) {
-                    log.error("DECISION action=BET_FAILED (REAL) slug={} side={}",
-                            snapshot.slug(), estimate.recommendedSide(), e);
+        double downThreshold =
+                getEffectiveEvThreshold(
+                        estimate.downChance()
+                );
+
+        double upMaxPrice =
+                tradingEngine.maxBuyPriceForEv(
+                        estimate.upChance(),
+                        upThreshold,
+                        tradingProperties.takerFee()
+                );
+
+        double downMaxPrice =
+                tradingEngine.maxBuyPriceForEv(
+                        estimate.downChance(),
+                        downThreshold,
+                        tradingProperties.takerFee()
+                );
+
+        log.info(
+                "INSTANT BUY EVALUATION slug={} secondsLeft={} live={} twap={} strike={} UP chance={} currentPrice={} threshold={} maxBuy={} DOWN chance={} currentPrice={} threshold={} maxBuy={}",
+                snapshot.slug(),
+                snapshot.secondsUntilClose(),
+                currentLivePrice,
+                currentTwapPrice,
+                snapshot.strikePriceUsd(),
+                round(estimate.upChance()),
+                round(currentUpPrice),
+                round(upThreshold),
+                round(upMaxPrice),
+                round(estimate.downChance()),
+                round(currentDownPrice),
+                round(downThreshold),
+                round(downMaxPrice)
+        );
+
+        /*
+         * MOCK
+         *
+         * Keep the existing mock strategy behavior for now.
+         */
+        if (tradingProperties.mock()) {
+
+            MarketSide side =
+                    estimate.recommendedSide();
+
+            double chance =
+                    estimate.recommendedChance();
+
+            double threshold =
+                    getEffectiveEvThreshold(chance);
+
+            if (chance < tradingProperties.minimumWinChance()) {
+                return;
+            }
+
+            if (estimate.recommendedEv() < threshold) {
+                return;
+            }
+
+            double marketPrice =
+                    side == MarketSide.UP
+                            ? currentUpPrice
+                            : currentDownPrice;
+
+            List<MockBet> placed =
+                    mockBetService.placeBetsForAllStrategies(
+                            snapshot,
+                            side,
+                            estimate.recommendedEv(),
+                            chance,
+                            BigDecimal.valueOf(marketPrice),
+                            currentLivePrice,
+                            snapshot.strikePriceUsd(),
+                            snapshot.secondsUntilClose()
+                    );
+
+            for (MockBet bet : placed) {
+
+                log.info(
+                        "DECISION action=BET_PLACED (MOCK) strategy={} slug={} side={} amount={} winChance={} ev={} threshold={}",
+                        bet.strategyId(),
+                        snapshot.slug(),
+                        side,
+                        tradingProperties.betAmount(),
+                        round(chance),
+                        round(estimate.recommendedEv()),
+                        round(threshold)
+                );
+            }
+
+            return;
+        }
+
+        /*
+         * REAL MODE
+         *
+         * Try UP and DOWN independently.
+         *
+         * IMPORTANT:
+         *
+         * We do NOT require the current ask to already be <= max price.
+         *
+         * We simply submit a FOK limit order at max price.
+         *
+         * If the book can immediately fill the whole order at that
+         * price or better -> filled.
+         *
+         * Otherwise -> FOK disappears.
+         */
+
+        if (estimate.upChance()
+                >= tradingProperties.minimumWinChance()
+                && upMaxPrice > 0.0) {
+
+            try {
+
+                RealBet bet =
+                        realBetService.placeRealBetAtPrice(
+                                snapshot,
+                                MarketSide.UP,
+                                BigDecimal.valueOf(upMaxPrice),
+                                0.0,
+                                estimate.upChance()
+                        );
+
+                log.info(
+                        "DECISION action=FOK_FILLED slug={} side=UP maxPrice={} winChance={} threshold={}",
+                        snapshot.slug(),
+                        upMaxPrice,
+                        round(estimate.upChance()),
+                        round(upThreshold)
+                );
+
+                /*
+                 * Once UP fills, do not try DOWN.
+                 *
+                 * We have one position per market.
+                 */
+                return;
+
+            } catch (RealBetService.FokNotFilledException e) {
+
+                log.debug(
+                        "DECISION action=FOK_NOT_FILLED slug={} side=UP maxPrice={} winChance={}",
+                        snapshot.slug(),
+                        upMaxPrice,
+                        round(estimate.upChance())
+                );
+
+            } catch (Exception e) {
+
+                log.error(
+                        "DECISION action=FOK_FAILED slug={} side=UP",
+                        snapshot.slug(),
+                        e
+                );
+            }
+        }
+
+        /*
+         * Re-check because another thread/event could potentially
+         * have filled a position between the UP and DOWN attempts.
+         */
+        if (realBetService.hasOpenBetFor(snapshot.slug())) {
+            return;
+        }
+
+        if (estimate.downChance()
+                >= tradingProperties.minimumWinChance()
+                && downMaxPrice > 0.0) {
+
+            try {
+
+                RealBet bet =
+                        realBetService.placeRealBetAtPrice(
+                                snapshot,
+                                MarketSide.DOWN,
+                                BigDecimal.valueOf(downMaxPrice),
+                                0.0,
+                                estimate.downChance()
+                        );
+
+                log.info(
+                        "DECISION action=FOK_FILLED slug={} side=DOWN maxPrice={} winChance={} threshold={}",
+                        snapshot.slug(),
+                        downMaxPrice,
+                        round(estimate.downChance()),
+                        round(downThreshold)
+                );
+
+            } catch (RealBetService.FokNotFilledException e) {
+
+                log.debug(
+                        "DECISION action=FOK_NOT_FILLED slug={} side=DOWN maxPrice={} winChance={}",
+                        snapshot.slug(),
+                        downMaxPrice,
+                        round(estimate.downChance())
+                );
+
+            } catch (Exception e) {
+
+                log.error(
+                        "DECISION action=FOK_FAILED slug={} side=DOWN",
+                        snapshot.slug(),
+                        e
+                );
+            }
+        }
+    }
+
+    /**
+     * Only SELL logic remains on the periodic scheduler.
+     */
+    private void evaluateSellOnly() {
+
+        try {
+
+            mockBetService.settleDueBets();
+
+            Optional<PolymarketMarketSnapshot> snapshotOpt =
+                    marketDataProvider.currentSnapshot();
+
+            if (snapshotOpt.isEmpty()) {
+                return;
+            }
+
+            PolymarketMarketSnapshot snapshot =
+                    snapshotOpt.get();
+
+            if (tradingProperties.mock()) {
+
+                List<MockBet> soldBets =
+                        mockBetService
+                                .evaluateSellForAllStrategies(snapshot);
+
+                for (MockBet bet : soldBets) {
+
+                    log.info(
+                            "DECISION action=SOLD (MOCK) strategy={} slug={} side={} boughtAt={} soldAt={} profitLoss={}",
+                            bet.strategyId(),
+                            bet.marketSlug(),
+                            bet.side(),
+                            bet.marketPriceAtBet(),
+                            bet.priceAtResolution(),
+                            bet.profitLoss()
+                    );
                 }
+
+            } else {
+
+                if (!realBetService.hasOpenBetFor(snapshot.slug())) {
+                    return;
+                }
+
+                Optional<RealBet> sold =
+                        realBetService.sellOpenPosition(
+                                snapshot
+                        );
+
+                sold.ifPresent(
+                        bet -> log.info(
+                                "DECISION action=SOLD (REAL) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
+                                bet.marketSlug(),
+                                bet.side(),
+                                bet.price(),
+                                bet.soldPrice(),
+                                bet.profitLoss()
+                        )
+                );
             }
 
         } catch (Exception e) {
-            log.error("Error during trading decision evaluation", e);
+
+            log.error(
+                    "Error during periodic SELL evaluation",
+                    e
+            );
         }
     }
 
-    private double getEffectiveEvThreshold(double winChance) {
-        double minEv = tradingProperties.minimumExpectedEv();
-        double minWinChance = tradingProperties.minimumWinChance();
+    private double getEffectiveEvThreshold(
+            double winChance) {
+
+        double minEv =
+                tradingProperties.minimumExpectedEv();
+
+        double minWinChance =
+                tradingProperties.minimumWinChance();
 
         if (winChance <= minWinChance) {
             return minEv;
@@ -270,48 +601,68 @@ public class TradingDecisionService {
             return minEv / 5.0;
         }
 
-        double progress = (winChance - minWinChance) / (0.90 - minWinChance);
+        double progress =
+                (winChance - minWinChance)
+                        / (0.90 - minWinChance);
 
-        return minEv * (1.0 - progress * 0.8);
+        return minEv
+                * (1.0 - progress * 0.8);
     }
 
-    // Buy-side skip logging
-    private void logSkip(String reason, String slug, String detail) {
-        String key = reason + "|" + slug;
-        String previousKey = lastSkipKey.getAndSet(key);
-        boolean changed = !key.equals(previousKey);
+    private void logSkip(
+            String reason,
+            String slug,
+            String detail) {
 
-        boolean heartbeatDue = Duration.between(lastSkipHeartbeatAt.get(), Instant.now())
-                .compareTo(SKIP_HEARTBEAT_INTERVAL) >= 0;
+        String key =
+                reason + "|" + slug;
 
-        if (changed || heartbeatDue) {
-            if (heartbeatDue) lastSkipHeartbeatAt.set(Instant.now());
-            log.info("DECISION skip reason={} slug={} detail='{}'{}",
-                    reason, slug, detail, changed ? "" : " (heartbeat, state unchanged)");
-        } else {
-            log.debug("DECISION skip reason={} slug={} detail='{}'", reason, slug, detail);
-        }
-    }
+        String previousKey =
+                lastSkipKey.getAndSet(key);
 
-    // Sell-side skip logging
-    private void logSellSkip(String reason, String slug, String detail) {
-        String key = reason + "|" + slug;
-        String previousKey = lastSellSkipKey.getAndSet(key);
-        boolean changed = !key.equals(previousKey);
+        boolean changed =
+                !key.equals(previousKey);
 
-        boolean heartbeatDue = Duration.between(lastSellSkipHeartbeatAt.get(), Instant.now())
-                .compareTo(SKIP_HEARTBEAT_INTERVAL) >= 0;
+        boolean heartbeatDue =
+                Duration.between(
+                                lastSkipHeartbeatAt.get(),
+                                Instant.now()
+                        )
+                        .compareTo(
+                                SKIP_HEARTBEAT_INTERVAL
+                        ) >= 0;
 
         if (changed || heartbeatDue) {
-            if (heartbeatDue) lastSellSkipHeartbeatAt.set(Instant.now());
-            log.info("SELL DECISION skip reason={} slug={} detail='{}'{}",
-                    reason, slug, detail, changed ? "" : " (heartbeat, state unchanged)");
+
+            if (heartbeatDue) {
+                lastSkipHeartbeatAt.set(
+                        Instant.now()
+                );
+            }
+
+            log.info(
+                    "DECISION skip reason={} slug={} detail='{}'{}",
+                    reason,
+                    slug,
+                    detail,
+                    changed
+                            ? ""
+                            : " (heartbeat, state unchanged)"
+            );
+
         } else {
-            log.debug("SELL DECISION skip reason={} slug={} detail='{}'", reason, slug, detail);
+
+            log.debug(
+                    "DECISION skip reason={} slug={} detail='{}'",
+                    reason,
+                    slug,
+                    detail
+            );
         }
     }
 
     private double round(double value) {
-        return Math.round(value * 10000.0) / 10000.0;
+        return Math.round(value * 10000.0)
+                / 10000.0;
     }
 }

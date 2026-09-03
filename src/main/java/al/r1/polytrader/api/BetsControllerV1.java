@@ -27,6 +27,7 @@ public class BetsControllerV1 {
         int open = 0;
         int won = 0;
         int lost = 0;
+        int sold = 0;
         BigDecimal netProfitLoss = BigDecimal.ZERO;
 
         for (MockBet bet : bets) {
@@ -40,9 +41,13 @@ public class BetsControllerV1 {
                     lost++;
                     netProfitLoss = netProfitLoss.add(bet.profitLoss());
                 }
+                case SOLD -> {
+                    sold++;
+                    netProfitLoss = netProfitLoss.add(bet.profitLoss());
+                }
             }
         }
 
-        return new BetsResponse(bets.size(), open, won, lost, netProfitLoss, bets);
+        return new BetsResponse(bets.size(), open, won, lost, sold, netProfitLoss, bets);
     }
 }

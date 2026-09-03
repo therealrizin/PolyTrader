@@ -6,6 +6,7 @@ import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.engine.model.UpDownEvEstimate;
 import al.r1.polytrader.services.betting.MockBetService;
 import al.r1.polytrader.services.betting.RealBetService;
+import al.r1.polytrader.services.betting.model.MockBet;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.PolymarketDataProvider;
@@ -39,8 +40,13 @@ public class TradingDecisionService {
 
     private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
 
+    // Buy-side skip logging state
     private final AtomicReference<String> lastSkipKey = new AtomicReference<>();
     private final AtomicReference<Instant> lastSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
+
+    // Sell-side skip logging state
+    private final AtomicReference<String> lastSellSkipKey = new AtomicReference<>();
+    private final AtomicReference<Instant> lastSellSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
 
     public TradingDecisionService(Prices prices, TradingEngine tradingEngine, PolymarketDataProvider marketDataProvider, MockBetService mockBetService, RealBetService realBetService, TradingProperties tradingProperties, TaskScheduler liveDataTaskScheduler) {
         this.prices = prices;
@@ -85,6 +91,43 @@ public class TradingDecisionService {
             }
 
             PolymarketMarketSnapshot snapshot = snapshotOpt.get();
+
+            /*
+             * SELL CHECK — runs every tick, ahead of every buy-side guard
+             * below (secondsSinceOpen, secondsUntilClose, already-open, etc).
+             *
+             * Selling closes a KNOWN, certain outcome at the current bid.
+             * Win chance is irrelevant; only the realized EV matters, and
+             * it's judged against the same minimumExpectedEv threshold
+             * used for entries. A successful sell frees this slug's slot
+             * immediately, so the buy-side logic below can re-enter the
+             * same window in this very tick if a fresh edge exists.
+             */
+            if (tradingProperties.mock()) {
+                if (!mockBetService.hasOpenBetFor(snapshot.slug())) {
+                    logSellSkip("NO_OPEN_BET", snapshot.slug(), "mock mode");
+                } else {
+                    Optional<MockBet> sold = mockBetService.maybeSellOpenPosition(snapshot);
+                    sold.ifPresentOrElse(
+                            bet -> log.info("DECISION action=SOLD (MOCK) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
+                                    bet.marketSlug(), bet.side(), bet.marketPriceAtBet(),
+                                    bet.priceAtResolution(), bet.profitLoss()),
+                            () -> logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "mock sell check returned empty (EV < threshold)")
+                    );
+                }
+            } else {
+                if (!realBetService.hasOpenBetFor(snapshot.slug())) {
+                    logSellSkip("NO_OPEN_BET", snapshot.slug(), "real mode");
+                } else {
+                    Optional<RealBetService.RealBet> sold = realBetService.sellOpenPosition(snapshot);
+                    sold.ifPresentOrElse(
+                            bet -> log.info("DECISION action=SOLD (REAL) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
+                                    bet.marketSlug(), bet.side(), bet.price(),
+                                    bet.soldPrice(), bet.profitLoss()),
+                            () -> logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "real sell check returned empty (EV < threshold or executor error)")
+                    );
+                }
+            }
 
             if (snapshot.secondsSinceOpen() < tradingProperties.minimumSecondsSinceOpen()) {
                 logSkip("TOO_SOON_AFTER_OPEN", snapshot.slug(),
@@ -157,21 +200,18 @@ public class TradingDecisionService {
                         round(estimate.recommendedChance()), tradingProperties.minimumWinChance());
                 return;
             }
-            if (estimate.recommendedEv() < tradingProperties.minimumExpectedEv()) {
-                log.info("DECISION skip reason=EV_BELOW_THRESHOLD slug={} side={} ev={} threshold={}",
+
+            // Dynamic EV threshold based on win chance
+            double effectiveEvThreshold = getEffectiveEvThreshold(estimate.recommendedChance());
+            if (estimate.recommendedEv() < effectiveEvThreshold) {
+                log.info("DECISION skip reason=EV_BELOW_THRESHOLD slug={} side={} ev={} threshold={} (winChance={})",
                         snapshot.slug(), estimate.recommendedSide(),
-                        round(estimate.recommendedEv()), tradingProperties.minimumExpectedEv());
+                        round(estimate.recommendedEv()), round(effectiveEvThreshold),
+                        round(estimate.recommendedChance()));
                 return;
             }
 
             double marketPriceForSide = estimate.recommendedSide() == MarketSide.UP ? upMarketPrice : downMarketPrice;
-
-            if (marketPriceForSide < 0.1) {
-                log.info("DECISION skip reason=MARKET_PRICE_TOO_LOW slug={} side={} marketPrice={}",
-                        snapshot.slug(), estimate.recommendedSide(),
-                        marketPriceForSide);
-                return;
-            }
 
             if (tradingProperties.mock()) {
                 mockBetService.placeMockBet(
@@ -179,17 +219,19 @@ public class TradingDecisionService {
                         marketPriceForSide, estimate.recommendedEv(), estimate.recommendedChance(),
                         snapshot.secondsUntilClose());
 
-                log.info("DECISION action=BET_PLACED (MOCK) slug={} side={} amount={} winChance={} ev={}",
+                log.info("DECISION action=BET_PLACED (MOCK) slug={} side={} amount={} winChance={} ev={} effectiveThreshold={}",
                         snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
-                        round(estimate.recommendedChance()), round(estimate.recommendedEv()));
+                        round(estimate.recommendedChance()), round(estimate.recommendedEv()),
+                        round(effectiveEvThreshold));
             } else {
                 try {
                     realBetService.placeRealBet(
                             snapshot, estimate.recommendedSide(), estimate.recommendedEv(), estimate.recommendedChance());
 
-                    log.info("DECISION action=BET_PLACED (REAL) slug={} side={} amount={} winChance={} ev={}",
+                    log.info("DECISION action=BET_PLACED (REAL) slug={} side={} amount={} winChance={} ev={} effectiveThreshold={}",
                             snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
-                            round(estimate.recommendedChance()), round(estimate.recommendedEv()));
+                            round(estimate.recommendedChance()), round(estimate.recommendedEv()),
+                            round(effectiveEvThreshold));
                 } catch (Exception e) {
                     log.error("DECISION action=BET_FAILED (REAL) slug={} side={}",
                             snapshot.slug(), estimate.recommendedSide(), e);
@@ -197,15 +239,34 @@ public class TradingDecisionService {
             }
 
             log.info("DECISION action=BET_PLACED slug={} side={} amount={} priceBetAt={} priceToAchieve={} " +
-                            "marketPriceForSide={} winChance={} ev={}",
+                            "marketPriceForSide={} winChance={} ev={} effectiveThreshold={}",
                     snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
                     currentPrice, snapshot.strikePriceUsd(), marketPriceForSide,
-                    round(estimate.recommendedChance()), round(estimate.recommendedEv()));
+                    round(estimate.recommendedChance()), round(estimate.recommendedEv()),
+                    round(effectiveEvThreshold));
         } catch (Exception e) {
             log.error("Error during trading decision evaluation", e);
         }
     }
 
+    /**
+     * Returns the effective EV threshold based on the recommended win chance.
+     * - ≥ 90% → threshold = minEv / 3
+     * - ≥ 80% → threshold = minEv * 2/3
+     * - otherwise → threshold = minEv
+     */
+    private double getEffectiveEvThreshold(double winChance) {
+        double minEv = tradingProperties.minimumExpectedEv();
+        if (winChance >= 0.90) {
+            return minEv / 3.0;
+        } else if (winChance >= 0.80) {
+            return minEv * 2.0 / 3.0;
+        } else {
+            return minEv;
+        }
+    }
+
+    // Buy-side skip logging
     private void logSkip(String reason, String slug, String detail) {
         String key = reason + "|" + slug;
         String previousKey = lastSkipKey.getAndSet(key);
@@ -220,6 +281,24 @@ public class TradingDecisionService {
                     reason, slug, detail, changed ? "" : " (heartbeat, state unchanged)");
         } else {
             log.debug("DECISION skip reason={} slug={} detail='{}'", reason, slug, detail);
+        }
+    }
+
+    // Sell-side skip logging
+    private void logSellSkip(String reason, String slug, String detail) {
+        String key = reason + "|" + slug;
+        String previousKey = lastSellSkipKey.getAndSet(key);
+        boolean changed = !key.equals(previousKey);
+
+        boolean heartbeatDue = Duration.between(lastSellSkipHeartbeatAt.get(), Instant.now())
+                .compareTo(SKIP_HEARTBEAT_INTERVAL) >= 0;
+
+        if (changed || heartbeatDue) {
+            if (heartbeatDue) lastSellSkipHeartbeatAt.set(Instant.now());
+            log.info("SELL DECISION skip reason={} slug={} detail='{}'{}",
+                    reason, slug, detail, changed ? "" : " (heartbeat, state unchanged)");
+        } else {
+            log.debug("SELL DECISION skip reason={} slug={} detail='{}'", reason, slug, detail);
         }
     }
 

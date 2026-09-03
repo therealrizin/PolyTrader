@@ -95,49 +95,18 @@ async fn main() -> anyhow::Result<()> {
     info!("Polymarket CLOB host: {}", host);
     info!("Configured deposit wallet: {}", deposit_wallet);
 
-    // CORRECTNESS GUARD:
-    //
-    // A deposit wallet is a separately-deployed ERC-1967 proxy contract
-    // (per Polymarket's deposit-wallet flow, live since the V2 cutover).
-    // It is NOT, and can never legitimately be, the same address as the
-    // EOA that owns/signs for it. If these match, POLYMARKET_DEPOSIT_WALLET
-    // almost certainly has the EOA address pasted into it by mistake
-    // instead of the actual deployed deposit-wallet contract address.
-    //
-    // Continuing with a bad address here won't fail at startup (the SDK
-    // has no way to know it's wrong yet) -- it will fail later on order
-    // submission with something like:
-    //
-    //     {"error":"maker address not allowed, please use the deposit
-    //     wallet flow"}
-    //
-    // Fail fast instead, with the actual fix spelled out, rather than
-    // 400ing on every single order at trade time.
-    let deposit_wallet_addr = alloy::primitives::Address::from_str(&deposit_wallet)
-        .expect("POLYMARKET_DEPOSIT_WALLET is not a valid address");
+    let deposit_wallet_addr =
+        alloy::primitives::Address::from_str(&deposit_wallet)
+            .expect("POLYMARKET_DEPOSIT_WALLET is not a valid address");
 
     if deposit_wallet_addr == signer.address() {
         panic!(
             "POLYMARKET_DEPOSIT_WALLET ({deposit_wallet}) is identical to the \
-             signer's EOA address ({}). A Polymarket deposit wallet is a \
-             separate deployed contract address and can never equal your \
-             EOA. Find your real deposit wallet address via: \
-             (1) the deposit address shown in your Polymarket account when \
-             logged in with this wallet, (2) the relayer's deposit-wallet \
-             derivation call (deriveDepositWalletAddress / \
-             get_expected_deposit_wallet), or (3) the WalletDeployed event \
-             from your onboarding flow. Then verify it's actually deployed \
-             with: GET https://relayer-v2.polymarket.com/deployed?address=<addr>&type=WALLET",
+             signer's EOA address ({}).",
             signer.address()
         );
     }
 
-    // This account requires the deposit-wallet flow (confirmed by the
-    // "please use the deposit wallet flow" rejection from the CLOB), so
-    // authenticate with the deposit wallet as funder and Poly1271 as the
-    // signature type. Orders are then made and signed as the deposit
-    // wallet (via ERC-7739-wrapped signatures verified through the wallet's
-    // isValidSignature()), not as the raw EOA.
     let client = Client::new(
         &host,
         Config::builder()
@@ -150,7 +119,11 @@ async fn main() -> anyhow::Result<()> {
     .authenticate()
     .await?;
 
-    info!("Successfully authenticated with Polymarket (deposit wallet flow, funder={})", deposit_wallet_addr);
+    info!(
+        "Successfully authenticated with Polymarket \
+         (deposit wallet flow, funder={})",
+        deposit_wallet_addr
+    );
 
     let state = AppState {
         client,
@@ -195,7 +168,9 @@ async fn place_order(
     }
 
     info!(
-        "Received order request: client_order_id={:?}, market_slug={:?}, token_id={}, side={}, price={}, size={}, amount_usdc={:?}, order_type={:?}",
+        "Received order request: client_order_id={:?}, market_slug={:?}, \
+         token_id={}, side={}, price={}, size={}, amount_usdc={:?}, \
+         order_type={:?}",
         req.client_order_id,
         req.market_slug,
         req.token_id,
@@ -241,32 +216,87 @@ async fn place_order(
 
     let order = match order_type {
         PolyOrderType::FOK | PolyOrderType::FAK => {
-            let amount_usdc = match req.amount_usdc.as_deref() {
-                Some(value) => value,
-                None => {
-                    return bad_request(
-                        "amount_usdc is required for FOK/FAK orders",
-                    );
+            /*
+             * Polymarket market-order amount semantics:
+             *
+             * BUY  -> amount is USDC
+             * SELL -> amount is SHARES
+             *
+             * Therefore:
+             *
+             * BUY:
+             *     req.amount_usdc -> Amount::usdc(...)
+             *
+             * SELL:
+             *     req.size        -> Amount::shares(...)
+             */
+
+            let amount = match side {
+                PolySide::Buy => {
+                    let amount_usdc = match req.amount_usdc.as_deref() {
+                        Some(value) => value,
+                        None => {
+                            return bad_request(
+                                "amount_usdc is required for BUY FOK/FAK orders",
+                            );
+                        }
+                    };
+
+                    let amount_decimal =
+                        match Decimal::try_from(amount_usdc) {
+                            Ok(value) => value,
+                            Err(e) => {
+                                return bad_request(&format!(
+                                    "Invalid amount_usdc: {e}"
+                                ));
+                            }
+                        };
+
+                    match Amount::usdc(amount_decimal) {
+                        Ok(amount) => amount,
+                        Err(e) => {
+                            return bad_request(&format!(
+                                "Invalid USDC amount: {e}"
+                            ));
+                        }
+                    }
+                }
+
+                PolySide::Sell => {
+                    let shares_decimal =
+                        match Decimal::try_from(req.size.as_str()) {
+                            Ok(value) => value,
+                            Err(e) => {
+                                return bad_request(&format!(
+                                    "Invalid SELL share amount: {e}"
+                                ));
+                            }
+                        };
+
+                    match Amount::shares(shares_decimal) {
+                        Ok(amount) => amount,
+                        Err(e) => {
+                            return bad_request(&format!(
+                                "Invalid SELL share amount: {e}"
+                            ));
+                        }
+                    }
+                }
+
+                _ => {
+                    return bad_request("Unsupported order side");
                 }
             };
 
-            let amount_decimal = match Decimal::try_from(amount_usdc) {
-                Ok(value) => value,
-                Err(e) => {
-                    return bad_request(&format!(
-                        "Invalid amount_usdc: {e}"
-                    ));
-                }
-            };
-
-            let amount = match Amount::usdc(amount_decimal) {
-                Ok(amount) => amount,
-                Err(e) => {
-                    return bad_request(&format!(
-                        "Invalid USDC amount: {e}"
-                    ));
-                }
-            };
+            info!(
+                "Building {:?} market order: side={:?}, token_id={}, \
+                 size={}, amount_usdc={:?}",
+                order_type,
+                side,
+                req.token_id,
+                req.size,
+                req.amount_usdc
+            );
 
             state
                 .client
@@ -358,8 +388,7 @@ async fn place_order(
                 warn!(
                     "This error means POLYMARKET_DEPOSIT_WALLET does not point \
                      at a real deployed deposit-wallet contract for this \
-                     account. Double-check the address (it must differ from \
-                     your EOA) and that it's actually deployed."
+                     account."
                 );
             }
 
@@ -378,7 +407,8 @@ async fn place_order(
     };
 
     info!(
-        "Polymarket order submitted successfully: order_id={}, status={:?}, success={}",
+        "Polymarket order submitted successfully: order_id={}, \
+         status={:?}, success={}",
         response.order_id,
         response.status,
         response.success
@@ -397,7 +427,9 @@ async fn place_order(
     )
 }
 
-fn bad_request(error: &str) -> (StatusCode, Json<OrderResponse>) {
+fn bad_request(
+    error: &str,
+) -> (StatusCode, Json<OrderResponse>) {
     (
         StatusCode::BAD_REQUEST,
         Json(OrderResponse {
@@ -411,7 +443,9 @@ fn bad_request(error: &str) -> (StatusCode, Json<OrderResponse>) {
     )
 }
 
-fn internal_error(error: &str) -> (StatusCode, Json<OrderResponse>) {
+fn internal_error(
+    error: &str,
+) -> (StatusCode, Json<OrderResponse>) {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(OrderResponse {

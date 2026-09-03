@@ -10,6 +10,7 @@ public record BetsResponse(
         int openBets,
         int wonBets,
         int lostBets,
+        int soldBets,
         BigDecimal netProfitLoss,
         List<MockBet> bets
 ) {}

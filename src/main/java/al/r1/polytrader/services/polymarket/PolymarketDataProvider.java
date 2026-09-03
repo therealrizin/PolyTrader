@@ -49,7 +49,6 @@ public class PolymarketDataProvider {
             ChainlinkSymbol.BTC_USD;
 
     private final WebClient gammaWebClient;
-    private final ObjectMapper objectMapper;
     private final PolymarketProperties properties;
     private final TaskScheduler liveDataTaskScheduler;
     private final Prices prices;
@@ -95,7 +94,6 @@ public class PolymarketDataProvider {
     public PolymarketDataProvider(
             @Qualifier("gammaWebClient")
             WebClient gammaWebClient,
-            ObjectMapper objectMapper,
             PolymarketProperties properties,
             TaskScheduler liveDataTaskScheduler,
             Prices prices,
@@ -103,7 +101,6 @@ public class PolymarketDataProvider {
             PolymarketMarketWebSocketClient marketWebSocketClient) {
 
         this.gammaWebClient = gammaWebClient;
-        this.objectMapper = objectMapper;
         this.properties = properties;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
         this.prices = prices;
@@ -307,16 +304,22 @@ public class PolymarketDataProvider {
             /*
              * IMPORTANT:
              *
-             * These are BEST ASKS, not 1-UP.
+             * upAsk/downAsk are BEST ASKS, not 1-UP.
              *
-             * The bot is a taker, therefore these represent the
-             * approximate executable prices for buying UP/DOWN.
+             * The bot is a taker on entry, so these represent the
+             * approximate executable prices for BUYING UP/DOWN.
+             *
+             * upBid/downBid are the corresponding BEST BIDS, i.e. the
+             * approximate executable prices for SELLING an already-held
+             * UP/DOWN position back to the market.
              */
             latestSnapshot.set(
                     new PolymarketMarketSnapshot(
                             slug,
                             upAsk,
                             downAsk,
+                            upBid,
+                            downBid,
                             secondsUntilClose,
                             strikePriceUsd,
                             secondsSinceOpen
@@ -412,7 +415,8 @@ public class PolymarketDataProvider {
      * Rebuilds the snapshot immediately when a WebSocket price changes.
      *
      * This is the important part: TradingDecisionService no longer
-     * has to wait for the next Gamma refresh to see a new UP/DOWN price.
+     * has to wait for the next Gamma refresh to see a new UP/DOWN price
+     * (buy side) or a new bid (sell side).
      */
     private void rebuildSnapshot(String slug) {
 
@@ -422,6 +426,9 @@ public class PolymarketDataProvider {
 
         BigDecimal upAsk = upBestAsk.get();
         BigDecimal downAsk = downBestAsk.get();
+
+        BigDecimal upBid = upBestBid.get();
+        BigDecimal downBid = downBestBid.get();
 
         BigDecimal strikePriceUsd =
                 referenceOpenPrice.get();
@@ -433,9 +440,6 @@ public class PolymarketDataProvider {
         }
 
         try {
-
-            long nowMillis =
-                    polymarketClock.nowMillis();
 
             /*
              * We need the market end time to calculate the
@@ -463,6 +467,8 @@ public class PolymarketDataProvider {
                             slug,
                             upAsk,
                             downAsk,
+                            upBid,
+                            downBid,
                             secondsUntilClose,
                             strikePriceUsd,
                             secondsSinceOpen
@@ -472,9 +478,9 @@ public class PolymarketDataProvider {
             log.debug(
                     "CLOB UPDATE slug={} UP bid={} ask={} DOWN bid={} ask={}",
                     slug,
-                    upBestBid.get(),
+                    upBid,
                     upAsk,
-                    downBestBid.get(),
+                    downBid,
                     downAsk
             );
 

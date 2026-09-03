@@ -6,6 +6,7 @@ import al.r1.polytrader.services.betting.model.BetStatus;
 import al.r1.polytrader.services.betting.model.MockBet;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
+import al.r1.polytrader.services.polymarket.model.PolymarketMarketSnapshot;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -15,6 +16,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -148,6 +150,164 @@ public class MockBetService {
         );
 
         return bet;
+    }
+
+    /**
+     * Checks whether the currently open MOCK bet (if any) for the market
+     * in {@code snapshot} should be sold back to the market right now,
+     * instead of held to resolution.
+     *
+     * Unlike the buy decision, win chance plays NO role here: selling
+     * realizes a KNOWN, certain outcome at the current bid, so the only
+     * question is whether that certain outcome clears the same EV bar
+     * used for entries ({@code trading.minimum-expected-ev}).
+     *
+     * On a successful sell, the slug's slot is freed immediately
+     * (removed from openSlugs) so a fresh entry can be taken in the very
+     * same market window on the next evaluation, if a new edge appears.
+     *
+     * @return the resulting SOLD bet, if a sell was executed
+     */
+    public Optional<MockBet> maybeSellOpenPosition(
+            PolymarketMarketSnapshot snapshot
+    ) {
+        if (snapshot == null) {
+            return Optional.empty();
+        }
+
+        String slug = snapshot.slug();
+
+        if (slug == null || !openSlugs.contains(slug)) {
+            return Optional.empty();
+        }
+
+        for (MockBet bet : bets.values()) {
+
+            if (bet.status() != BetStatus.OPEN) {
+                continue;
+            }
+
+            if (!slug.equals(bet.marketSlug())) {
+                continue;
+            }
+
+            BigDecimal currentBid =
+                    bet.side() == MarketSide.UP
+                            ? snapshot.upBid()
+                            : snapshot.downBid();
+
+            if (currentBid == null || currentBid.signum() <= 0) {
+                log.debug(
+                        "Cannot evaluate sell for MOCK bet {} on {}: no live bid for side={}",
+                        bet.id(), slug, bet.side()
+                );
+                continue;
+            }
+
+            BigDecimal netProfitIfSold = netProfitFromSelling(bet, currentBid);
+
+            double sellingEv =
+                    netProfitIfSold
+                            .divide(bet.amount(), 8, RoundingMode.HALF_UP)
+                            .doubleValue();
+
+            if (sellingEv >= tradingProperties.minimumExpectedEv()) {
+                return Optional.of(sellBet(bet, currentBid, netProfitIfSold, sellingEv));
+            } else {
+                // Promote from DEBUG to INFO for better visibility
+                log.info(
+                        "SELL_CHECK slug={} betId={} side={} currentBid={} sellingEv={} threshold={} -> hold",
+                        slug, bet.id(), bet.side(), currentBid, sellingEv,
+                        tradingProperties.minimumExpectedEv()
+                );
+            }
+        }
+
+        return Optional.empty();
+    }
+
+    /**
+     * Net profit (already fee-adjusted) if the bet were closed right now
+     * at {@code currentBid}. The taker fee only applies to positive
+     * profit, matching the settlement logic in {@link #settleBet}: a
+     * losing close isn't further reduced by fees, it's just the shares'
+     * mark-to-market loss.
+     */
+    private BigDecimal netProfitFromSelling(
+            MockBet bet,
+            BigDecimal currentBid
+    ) {
+        BigDecimal shares =
+                bet.amount().divide(
+                        bet.marketPriceAtBet(),
+                        8,
+                        RoundingMode.HALF_UP
+                );
+
+        BigDecimal grossProceeds =
+                shares.multiply(currentBid);
+
+        BigDecimal grossProfit =
+                grossProceeds.subtract(bet.amount());
+
+        if (grossProfit.signum() <= 0) {
+            return grossProfit.setScale(4, RoundingMode.HALF_UP);
+        }
+
+        return grossProfit
+                .multiply(
+                        BigDecimal.ONE.subtract(
+                                BigDecimal.valueOf(tradingProperties.takerFee())
+                        )
+                )
+                .setScale(4, RoundingMode.HALF_UP);
+    }
+
+    private MockBet sellBet(
+            MockBet bet,
+            BigDecimal currentBid,
+            BigDecimal netProfit,
+            double sellingEv
+    ) {
+        MockBet sold = new MockBet(
+                bet.id(),
+                bet.marketSlug(),
+                bet.side(),
+                bet.amount(),
+                bet.priceBetAt(),
+                bet.priceToAchieve(),
+                bet.marketPriceAtBet(),
+                bet.countedEv(),
+                bet.countedWinChance(),
+                bet.potentialValue(),
+                bet.placedAt(),
+                bet.resolvesAt(),
+                BetStatus.SOLD,
+                currentBid,
+                netProfit
+        );
+
+        bets.put(bet.id(), sold);
+
+        // Free the slot: this is what allows re-entry into the same
+        // window on the very next evaluation.
+        openSlugs.remove(bet.marketSlug());
+
+        log.info(
+                "Sold MOCK bet {} on {}: side={} boughtAt={} sellingBid={} " +
+                        "amount={} netProfit={} sellingEv={} threshold={} (slot freed for re-entry)",
+                bet.id(),
+                bet.marketSlug(),
+                bet.side(),
+                bet.marketPriceAtBet(),
+                currentBid,
+                bet.amount(),
+                netProfit,
+                sellingEv,
+                tradingProperties.minimumExpectedEv()
+        );
+
+        return sold;
     }
 
     /**

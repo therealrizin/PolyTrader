@@ -6,6 +6,8 @@ public record PolymarketMarketSnapshot(
         String slug,
         BigDecimal upPrice,
         BigDecimal downPrice,
+        BigDecimal upBid,
+        BigDecimal downBid,
         long secondsUntilClose,
         BigDecimal strikePriceUsd,
         long secondsSinceOpen

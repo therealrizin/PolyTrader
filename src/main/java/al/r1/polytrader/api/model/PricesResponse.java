@@ -8,10 +8,6 @@ import java.math.BigDecimal;
 import java.util.Comparator;
 import java.util.List;
 
-/**
- * Deliberately minimal: price, 60s TWAP, and the last 60 recorded seconds
- * of both — no per-exchange fields, no blended averages.
- */
 public record PricesResponse(
         ChainlinkSymbol symbol,
         BigDecimal price,

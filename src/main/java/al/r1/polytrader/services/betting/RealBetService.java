@@ -3,7 +3,10 @@ package al.r1.polytrader.services.betting;
 import al.r1.polytrader.config.model.TradingProperties;
 import al.r1.polytrader.engine.TradingEngine;
 import al.r1.polytrader.engine.model.MarketSide;
-import al.r1.polytrader.services.betting.model.RealBetStatus;
+import al.r1.polytrader.services.betting.model.BetStatus;
+import al.r1.polytrader.services.betting.model.ExecutionOrderRequest;
+import al.r1.polytrader.services.betting.model.ExecutionOrderResponse;
+import al.r1.polytrader.services.betting.model.RealBet;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.PolymarketMarketResolver;
@@ -30,38 +33,22 @@ import java.util.concurrent.ConcurrentHashMap;
 @Service
 public class RealBetService {
 
-    private static final ChainlinkSymbol SYMBOL =
-            ChainlinkSymbol.BTC_USD;
-
-    /*
-     * Sell at most 99.5% of the recorded position size.
-     *
-     * This provides a small safety buffer against balance/fill
-     * accounting differences.
-     */
-    private static final BigDecimal SELL_SAFETY_MARGIN =
-            new BigDecimal("0.995");
+    private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
+    private static final BigDecimal SELL_SAFETY_MARGIN = new BigDecimal("0.995");
 
     private final TradingProperties tradingProperties;
     private final PolymarketMarketResolver marketResolver;
     private final WebClient executionWebClient;
     private final Prices prices;
     private final TradingEngine tradingEngine;
-
-    private final ObjectMapper objectMapper =
-            new ObjectMapper();
-
-    private final Set<String> openSlugs =
-            ConcurrentHashMap.newKeySet();
-
-    private final Map<String, RealBet> bets =
-            new ConcurrentHashMap<>();
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final Set<String> openSlugs = ConcurrentHashMap.newKeySet();
+    private final Map<String, RealBet> bets = new ConcurrentHashMap<>();
 
     public RealBetService(
             TradingProperties tradingProperties,
             PolymarketMarketResolver marketResolver,
-            @Qualifier("executionWebClient")
-            WebClient executionWebClient,
+            @Qualifier("executionWebClient") WebClient executionWebClient,
             Prices prices,
             TradingEngine tradingEngine) {
 
@@ -72,179 +59,74 @@ public class RealBetService {
         this.tradingEngine = tradingEngine;
     }
 
-    public boolean hasOpenBetFor(
-            String slug
-    ) {
+    public boolean hasOpenBetFor(String slug) {
         return openSlugs.contains(slug);
     }
 
-    public RealBet placeRealBet(
-            PolymarketMarketSnapshot snapshot,
-            MarketSide side,
-            double countedEv,
-            double countedWinChance) {
-
+    public RealBet placeRealBet(PolymarketMarketSnapshot snapshot, MarketSide side, double countedEv, double countedWinChance) {
         if (snapshot == null) {
-            throw new IllegalArgumentException(
-                    "Polymarket snapshot cannot be null"
-            );
+            throw new IllegalArgumentException("Polymarket snapshot cannot be null");
         }
 
-        String slug =
-                snapshot.slug();
-
+        String slug = snapshot.slug();
         if (slug == null || slug.isBlank()) {
-            throw new IllegalArgumentException(
-                    "Polymarket market slug cannot be empty"
-            );
+            throw new IllegalArgumentException("Polymarket market slug cannot be empty");
         }
 
         if (!openSlugs.add(slug)) {
-            throw new IllegalStateException(
-                    "Already have an open real bet for market "
-                            + slug
-            );
+            throw new IllegalStateException("Already have an open real bet for market " + slug);
         }
 
         try {
-            /*
-             * ----------------------------------------------------------
-             * FIRST SAFETY CHECK
-             * ----------------------------------------------------------
-             *
-             * Do not even begin constructing a real order unless we have
-             * received a timestamped RTDS Chainlink price recently.
-             */
             requireFreshPrice(slug);
 
-            BigDecimal price =
-                    getExecutablePrice(
-                            snapshot,
-                            side
-                    );
-
+            BigDecimal price = getExecutablePrice(snapshot, side);
             validatePrice(price);
 
-            BigDecimal amount =
-                    tradingProperties.betAmount();
-
-            if (amount == null
-                    || amount.compareTo(BigDecimal.ZERO) <= 0) {
-
-                throw new IllegalStateException(
-                        "trading.bet-amount must be > 0"
-                );
+            BigDecimal amount = tradingProperties.betAmount();
+            if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+                throw new IllegalStateException("trading.bet-amount must be > 0");
             }
 
             PolymarketMarketResolver.ResolvedMarket market =
                     marketResolver.resolveCurrentMarket()
-                            .filter(
-                                    m -> m.slug().equals(slug)
-                            )
-                            .orElseThrow(
-                                    () -> new IllegalStateException(
-                                            "Could not resolve CLOB token IDs for "
-                                                    + slug
-                                    )
-                            );
+                            .filter(m -> m.slug().equals(slug))
+                            .orElseThrow(() -> new IllegalStateException("Could not resolve CLOB token IDs for " + slug));
 
-            String tokenId =
-                    side == MarketSide.UP
-                            ? market.upTokenId()
-                            : market.downTokenId();
-
-            if (tokenId == null
-                    || tokenId.isBlank()) {
-
-                throw new IllegalStateException(
-                        "Resolved token ID is empty for "
-                                + slug
-                                + " / "
-                                + side
-                );
+            String tokenId = side == MarketSide.UP ? market.upTokenId() : market.downTokenId();
+            if (tokenId == null || tokenId.isBlank()) {
+                throw new IllegalStateException("Resolved token ID is empty for " + slug + " / " + side);
             }
 
-            /*
-             * ----------------------------------------------------------
-             * SECOND SAFETY CHECK
-             * ----------------------------------------------------------
-             *
-             * Resolving the market/token IDs above may take time.
-             *
-             * Check AGAIN immediately before calculating/submitting
-             * the order.
-             */
             requireFreshPrice(slug);
 
-            BigDecimal size =
-                    amount.divide(
-                            price,
-                            8,
-                            RoundingMode.DOWN
-                    );
-
+            BigDecimal size = amount.divide(price, 8, RoundingMode.DOWN);
             if (size.compareTo(BigDecimal.ZERO) <= 0) {
-                throw new IllegalStateException(
-                        "Calculated order size is zero"
-                );
+                throw new IllegalStateException("Calculated order size is zero");
             }
 
-            BigDecimal amountUsdc =
-                    price.multiply(size)
-                            .setScale(
-                                    2,
-                                    RoundingMode.HALF_UP
-                            );
+            BigDecimal amountUsdc = price.multiply(size).setScale(2, RoundingMode.HALF_UP);
+            String clientBetId = UUID.randomUUID().toString();
 
-            String clientBetId =
-                    UUID.randomUUID().toString();
-
-            /*
-             * BUY orders do not specify amount in shares.
-             */
-            ExecutionOrderRequest request =
-                    new ExecutionOrderRequest(
-                            clientBetId,
-                            slug,
-                            tokenId,
-                            "BUY",
-                            price.toPlainString(),
-                            size.toPlainString(),
-                            amountUsdc.toPlainString(),
-                            "FOK",
-                            null
-                    );
+            ExecutionOrderRequest request = new ExecutionOrderRequest(
+                    clientBetId,
+                    slug,
+                    tokenId,
+                    "BUY",
+                    price.toPlainString(),
+                    size.toPlainString(),
+                    amountUsdc.toPlainString(),
+                    "FOK",
+                    null
+            );
 
             try {
-                String json =
-                        objectMapper.writeValueAsString(
-                                request
-                        );
-
-                log.info(
-                        "REAL BET REQUEST JSON: {}",
-                        json
-                );
-
+                String json = objectMapper.writeValueAsString(request);
+                log.info("REAL BET REQUEST JSON: {}", json);
             } catch (Exception e) {
-                log.warn(
-                        "Failed to serialize request JSON",
-                        e
-                );
+                log.warn("Failed to serialize request JSON", e);
             }
 
-            /*
-             * ----------------------------------------------------------
-             * FINAL SAFETY CHECK
-             * ----------------------------------------------------------
-             *
-             * This is intentionally immediately before the HTTP call.
-             *
-             * A fresh price can become stale while resolving the market,
-             * calculating the order, etc.
-             *
-             * If the RTDS price is now >500 ms old, DO NOT BET.
-             */
             requireFreshPrice(slug);
 
             log.info(
@@ -263,74 +145,37 @@ public class RealBetService {
             );
 
             ExecutionOrderResponse response;
-
             try {
-                response =
-                        executionWebClient.post()
-                                .uri("/order")
-                                .bodyValue(request)
-                                .retrieve()
-                                .bodyToMono(
-                                        ExecutionOrderResponse.class
-                                )
-                                .block(
-                                        Duration.ofSeconds(10)
-                                );
-
+                response = executionWebClient.post()
+                        .uri("/order")
+                        .bodyValue(request)
+                        .retrieve()
+                        .bodyToMono(ExecutionOrderResponse.class)
+                        .block(Duration.ofSeconds(10));
             } catch (WebClientResponseException e) {
-
-                String errorBody =
-                        e.getResponseBodyAsString();
-
-                log.error(
-                        "Executor error response (status {}): {}",
-                        e.getStatusCode(),
-                        errorBody
-                );
-
-                throw new IllegalStateException(
-                        "Executor rejected order: "
-                                + errorBody,
-                        e
-                );
+                String errorBody = e.getResponseBodyAsString();
+                log.error("Executor error response (status {}): {}", e.getStatusCode(), errorBody);
+                throw new IllegalStateException("Executor rejected order: " + errorBody, e);
             }
 
             if (response == null) {
-                throw new IllegalStateException(
-                        "Execution service returned empty response"
-                );
+                throw new IllegalStateException("Execution service returned empty response");
             }
-
             if (!response.success()) {
-                throw new IllegalStateException(
-                        "Polymarket order rejected: "
-                                + response.error()
-                );
+                throw new IllegalStateException("Polymarket order rejected: " + response.error());
+            }
+            if (response.orderId() == null || response.orderId().isBlank()) {
+                throw new IllegalStateException("Polymarket returned success but no order_id");
             }
 
-            if (response.orderId() == null
-                    || response.orderId().isBlank()) {
-
-                throw new IllegalStateException(
-                        "Polymarket returned success but no order_id"
-                );
-            }
-
-            Instant placedAt =
-                    Instant.now();
-
-            BigDecimal actualSize =
-                    response.takingAmount() != null
-                            && response.takingAmount().signum() > 0
-                            ? response.takingAmount()
-                            : size;
+            Instant placedAt = Instant.now();
+            BigDecimal actualSize = response.takingAmount() != null && response.takingAmount().signum() > 0
+                    ? response.takingAmount()
+                    : size;
 
             if (actualSize.compareTo(size) != 0) {
-
                 log.info(
-                        "REAL BET actual fill size differs from estimate: "
-                                + "id={} slug={} estimatedSize={} actualFillSize={} "
-                                + "(makingAmount={} takingAmount={})",
+                        "REAL BET actual fill size differs from estimate: id={} slug={} estimatedSize={} actualFillSize={} (makingAmount={} takingAmount={})",
                         clientBetId,
                         slug,
                         size,
@@ -340,30 +185,26 @@ public class RealBetService {
                 );
             }
 
-            RealBet bet =
-                    new RealBet(
-                            clientBetId,
-                            response.orderId(),
-                            tokenId,
-                            slug,
-                            side,
-                            amount,
-                            price,
-                            actualSize,
-                            countedEv,
-                            countedWinChance,
-                            placedAt,
-                            snapshot.secondsUntilClose(),
-                            RealBetStatus.OPEN,
-                            null,
-                            null,
-                            null
-                    );
-
-            bets.put(
+            RealBet bet = new RealBet(
                     clientBetId,
-                    bet
+                    response.orderId(),
+                    tokenId,
+                    slug,
+                    side,
+                    amount,
+                    price,
+                    actualSize,
+                    countedEv,
+                    countedWinChance,
+                    placedAt,
+                    snapshot.secondsUntilClose(),
+                    BetStatus.OPEN,
+                    null,
+                    null,
+                    null
             );
+
+            bets.put(clientBetId, bet);
 
             log.info(
                     "REAL BET ACCEPTED: id={} orderId={} slug={} side={} price={} recordedSize={} amount={}",
@@ -379,66 +220,31 @@ public class RealBetService {
             return bet;
 
         } catch (Exception e) {
-
             openSlugs.remove(slug);
-
-            log.error(
-                    "REAL BET FAILED: slug={} side={}",
-                    slug,
-                    side,
-                    e
-            );
-
+            log.error("REAL BET FAILED: slug={} side={}", slug, side, e);
             throw e;
         }
     }
 
-    /**
-     * Refuses REAL betting unless the latest Chainlink RTDS observation
-     * is no older than 500 ms.
-     *
-     * This check uses the timestamp supplied by Polymarket RTDS,
-     * NOT the time at which our Java process received the event.
-     */
-    private void requireFreshPrice(
-            String slug
-    ) {
-        long observedAtMillis =
-                prices.getLastPriceTimestampMillis(
-                        SYMBOL
-                );
-
-        long ageMillis =
-                prices.getPriceAgeMillis(
-                        SYMBOL
-                );
-
-        BigDecimal currentPrice =
-                prices.getPrice(SYMBOL);
+    private void requireFreshPrice(String slug) {
+        long observedAtMillis = prices.getLastPriceTimestampMillis(SYMBOL);
+        long ageMillis = prices.getPriceAgeMillis(SYMBOL);
+        BigDecimal currentPrice = prices.getPrice(SYMBOL);
 
         if (observedAtMillis <= 0) {
-
             log.warn(
-                    "REAL BET BLOCKED: slug={} reason=NO_RTDS_PRICE " +
-                            "symbol={} currentPrice={} lastTimestamp={}",
+                    "REAL BET BLOCKED: slug={} reason=NO_RTDS_PRICE symbol={} currentPrice={} lastTimestamp={}",
                     slug,
                     SYMBOL,
                     currentPrice,
                     observedAtMillis
             );
-
-            throw new IllegalStateException(
-                    "Cannot place real bet: no timestamped "
-                            + "Polymarket RTDS Chainlink price available"
-            );
+            throw new IllegalStateException("Cannot place real bet: no timestamped Polymarket RTDS Chainlink price available");
         }
 
         if (!prices.isPriceFresh(SYMBOL)) {
-
             log.warn(
-                    "REAL BET BLOCKED: slug={} reason=STALE_RTDS_PRICE " +
-                            "symbol={} currentPrice={} ageMs={} maxAgeMs={} " +
-                            "observedAt={} now={}",
+                    "REAL BET BLOCKED: slug={} reason=STALE_RTDS_PRICE symbol={} currentPrice={} ageMs={} maxAgeMs={} observedAt={} now={}",
                     slug,
                     SYMBOL,
                     currentPrice,
@@ -447,10 +253,8 @@ public class RealBetService {
                     Instant.ofEpochMilli(observedAtMillis),
                     Instant.now()
             );
-
             throw new IllegalStateException(
-                    "Cannot place real bet: Chainlink RTDS price is stale. "
-                            + "Age="
+                    "Cannot place real bet: Chainlink RTDS price is stale. Age="
                             + ageMillis
                             + "ms, maximum="
                             + Prices.MAX_PRICE_AGE_MILLIS
@@ -459,29 +263,7 @@ public class RealBetService {
         }
     }
 
-    /**
-     * Evaluate whether selling the currently open position has greater
-     * expected value than continuing to hold it until resolution.
-     *
-     * SELL VALUE:
-     *
-     *     current bid - selling fee
-     *
-     * HOLD VALUE:
-     *
-     *     current probability of our side winning
-     *
-     * SELL EV:
-     *
-     *     sellValue - holdValue
-     *
-     * The position is sold only when:
-     *
-     *     sellingEv >= minimumExpectedEv / 3
-     */
-    public synchronized Optional<RealBet> sellOpenPosition(
-            PolymarketMarketSnapshot snapshot
-    ) {
+    public synchronized Optional<RealBet> sellOpenPosition(PolymarketMarketSnapshot snapshot) {
         if (snapshot == null) {
             return Optional.empty();
         }
@@ -492,51 +274,36 @@ public class RealBetService {
                     snapshot.slug(),
                     prices.getPriceAgeMillis(SYMBOL)
             );
-
             return Optional.empty();
         }
 
-        String slug =
-                snapshot.slug();
-
-        if (slug == null
-                || !openSlugs.contains(slug)) {
-
+        String slug = snapshot.slug();
+        if (slug == null || !openSlugs.contains(slug)) {
             return Optional.empty();
         }
 
-        RealBet bet =
-                findOpenBetForSlug(slug);
-
+        RealBet bet = findOpenBetForSlug(slug);
         if (bet == null) {
             return Optional.empty();
         }
 
-        BigDecimal currentBid =
-                bet.side() == MarketSide.UP
-                        ? snapshot.upBid()
-                        : snapshot.downBid();
+        BigDecimal currentBid = bet.side() == MarketSide.UP
+                ? snapshot.upBid()
+                : snapshot.downBid();
 
-        if (currentBid == null
-                || currentBid.signum() <= 0) {
-
+        if (currentBid == null || currentBid.signum() <= 0) {
             log.info(
-                    "SELL_CHECK (REAL) slug={} betId={} side={} " +
-                            "currentBid={} -> hold (no live bid)",
+                    "SELL_CHECK (REAL) slug={} betId={} side={} currentBid={} -> hold (no live bid)",
                     slug,
                     bet.id(),
                     bet.side(),
                     currentBid
             );
-
             return Optional.empty();
         }
 
-        BigDecimal currentLivePrice =
-                prices.getPrice(SYMBOL);
-
-        BigDecimal currentTwapPrice =
-                prices.getAvg60sPrice(SYMBOL);
+        BigDecimal currentLivePrice = prices.getPrice(SYMBOL);
+        BigDecimal currentTwapPrice = prices.getAvg60sPrice(SYMBOL);
 
         if (currentLivePrice == null
                 || currentLivePrice.signum() <= 0
@@ -545,75 +312,36 @@ public class RealBetService {
                 || snapshot.strikePriceUsd() == null) {
 
             log.info(
-                    "SELL_CHECK (REAL) slug={} betId={} side={} " +
-                            "currentBid={} -> hold (price model unavailable)",
+                    "SELL_CHECK (REAL) slug={} betId={} side={} currentBid={} -> hold (price model unavailable)",
                     slug,
                     bet.id(),
                     bet.side(),
                     currentBid
             );
-
             return Optional.empty();
         }
 
-        /*
-         * Calculate the CURRENT probability model.
-         */
-        var estimate =
-                tradingEngine.estimateUpDown(
-                        currentLivePrice,
-                        currentTwapPrice,
-                        snapshot.strikePriceUsd(),
-                        (int) snapshot.secondsUntilClose(),
-                        snapshot.upPrice() != null
-                                ? snapshot.upPrice().doubleValue()
-                                : 0.5,
-                        snapshot.downPrice() != null
-                                ? snapshot.downPrice().doubleValue()
-                                : 0.5,
-                        tradingProperties.takerFee()
-                );
+        var estimate = tradingEngine.estimateUpDown(
+                currentLivePrice,
+                currentTwapPrice,
+                snapshot.strikePriceUsd(),
+                (int) snapshot.secondsUntilClose(),
+                snapshot.upPrice() != null ? snapshot.upPrice().doubleValue() : 0.5,
+                snapshot.downPrice() != null ? snapshot.downPrice().doubleValue() : 0.5,
+                tradingProperties.takerFee()
+        );
 
-        double winChance =
-                bet.side() == MarketSide.UP
-                        ? estimate.upChance()
-                        : estimate.downChance();
-
-        double holdValue =
-                tradingEngine.holdValuePerShare(
-                        winChance
-                );
-
-        double sellValue =
-                tradingEngine.netSellValuePerShare(
-                        currentBid.doubleValue(),
-                        tradingProperties.takerFee()
-                );
-
-        double sellingEv =
-                sellValue - holdValue;
-
-        double currentReturn =
-                bet.price().signum() > 0
-                        ? currentBid
-                        .divide(
-                                bet.price(),
-                                8,
-                                RoundingMode.HALF_UP
-                        )
-                        .doubleValue()
-                        - 1.0
-                        : 0.0;
-
-        double sellThreshold =
-                tradingProperties.minimumExpectedEv()
-                        / 3.0;
+        double winChance = bet.side() == MarketSide.UP ? estimate.upChance() : estimate.downChance();
+        double holdValue = tradingEngine.holdValuePerShare(winChance);
+        double sellValue = tradingEngine.netSellValuePerShare(currentBid.doubleValue(), tradingProperties.takerFee());
+        double sellingEv = sellValue - holdValue;
+        double currentReturn = bet.price().signum() > 0
+                ? currentBid.divide(bet.price(), 8, RoundingMode.HALF_UP).doubleValue() - 1.0
+                : 0.0;
+        double sellThreshold = tradingProperties.minimumExpectedEv() / 3.0;
 
         log.info(
-                "SELL_CHECK (REAL) slug={} betId={} side={} " +
-                        "currentBid={} winChance={} holdValue={} " +
-                        "sellValue={} sellingEv={} threshold={} " +
-                        "currentReturn={} secondsLeft={}",
+                "SELL_CHECK (REAL) slug={} betId={} side={} currentBid={} winChance={} holdValue={} sellValue={} sellingEv={} threshold={} currentReturn={} secondsLeft={}",
                 slug,
                 bet.id(),
                 bet.side(),
@@ -628,11 +356,8 @@ public class RealBetService {
         );
 
         if (sellingEv < sellThreshold) {
-
             log.info(
-                    "SELL_CHECK (REAL) slug={} betId={} side={} " +
-                            "currentBid={} winChance={} holdValue={} " +
-                            "sellValue={} sellingEv={} threshold={} -> hold",
+                    "SELL_CHECK (REAL) slug={} betId={} side={} currentBid={} winChance={} holdValue={} sellValue={} sellingEv={} threshold={} -> hold",
                     slug,
                     bet.id(),
                     bet.side(),
@@ -643,63 +368,34 @@ public class RealBetService {
                     round(sellingEv),
                     round(sellThreshold)
             );
-
             return Optional.empty();
         }
 
-        // Final safety check: the price may have become stale while calculating EV.
         if (!prices.isPriceFresh(SYMBOL)) {
             log.info(
-                    "SELL_CHECK (REAL) slug={} betId={} side={} -> hold " +
-                            "(Chainlink price became stale before sell, ageMs={})",
+                    "SELL_CHECK (REAL) slug={} betId={} side={} -> hold (Chainlink price became stale before sell, ageMs={})",
                     slug,
                     bet.id(),
                     bet.side(),
                     prices.getPriceAgeMillis(SYMBOL)
             );
-
             return Optional.empty();
         }
 
         try {
-            return Optional.of(
-                    executeSell(
-                            bet,
-                            currentBid,
-                            sellingEv,
-                            winChance,
-                            holdValue,
-                            sellValue,
-                            sellThreshold
-                    )
-            );
-
+            return Optional.of(executeSell(bet, currentBid, sellingEv, winChance, holdValue, sellValue, sellThreshold));
         } catch (Exception e) {
-
-            log.error(
-                    "REAL SELL FAILED: id={} slug={} side={}",
-                    bet.id(),
-                    slug,
-                    bet.side(),
-                    e
-            );
-
+            log.error("REAL SELL FAILED: id={} slug={} side={}", bet.id(), slug, bet.side(), e);
             return Optional.empty();
         }
     }
 
-    private RealBet findOpenBetForSlug(
-            String slug
-    ) {
+    private RealBet findOpenBetForSlug(String slug) {
         for (RealBet bet : bets.values()) {
-
-            if (bet.status() == RealBetStatus.OPEN
-                    && slug.equals(bet.marketSlug())) {
-
+            if (bet.status() == BetStatus.OPEN && slug.equals(bet.marketSlug())) {
                 return bet;
             }
         }
-
         return null;
     }
 
@@ -710,90 +406,43 @@ public class RealBetService {
             double winChance,
             double holdValue,
             double sellValue,
-            double sellThreshold
-    ) {
-        String slug =
-                bet.marketSlug();
+            double sellThreshold) {
 
-        BigDecimal safeHeldSize =
-                bet.size()
-                        .multiply(
-                                SELL_SAFETY_MARGIN
-                        );
-
-        BigDecimal sellSize =
-                safeHeldSize.setScale(
-                        2,
-                        RoundingMode.DOWN
-                );
+        String slug = bet.marketSlug();
+        BigDecimal safeHeldSize = bet.size().multiply(SELL_SAFETY_MARGIN);
+        BigDecimal sellSize = safeHeldSize.setScale(2, RoundingMode.DOWN);
 
         if (sellSize.signum() <= 0) {
-            throw new IllegalStateException(
-                    "Position size "
-                            + bet.size()
-                            + " rounds down to zero sellable shares"
-            );
+            throw new IllegalStateException("Position size " + bet.size() + " rounds down to zero sellable shares");
         }
 
-        BigDecimal amountUsdc =
-                sellSize
-                        .multiply(currentBid)
-                        .setScale(
-                                2,
-                                RoundingMode.HALF_UP
-                        );
+        BigDecimal amountUsdc = sellSize.multiply(currentBid).setScale(2, RoundingMode.HALF_UP);
+        String clientOrderId = UUID.randomUUID().toString();
 
-        String clientOrderId =
-                UUID.randomUUID().toString();
-
-        ExecutionOrderRequest request =
-                new ExecutionOrderRequest(
-                        clientOrderId,
-                        slug,
-                        bet.tokenId(),
-                        "SELL",
-                        currentBid.toPlainString(),
-                        sellSize.toPlainString(),
-                        amountUsdc.toPlainString(),
-                        "FOK",
-                        sellSize.toPlainString()
-                );
+        ExecutionOrderRequest request = new ExecutionOrderRequest(
+                clientOrderId,
+                slug,
+                bet.tokenId(),
+                "SELL",
+                currentBid.toPlainString(),
+                sellSize.toPlainString(),
+                amountUsdc.toPlainString(),
+                "FOK",
+                sellSize.toPlainString()
+        );
 
         try {
-            String json =
-                    objectMapper.writeValueAsString(
-                            request
-                    );
-
-            log.info(
-                    "REAL SELL REQUEST JSON: {}",
-                    json
-            );
-
+            String json = objectMapper.writeValueAsString(request);
+            log.info("REAL SELL REQUEST JSON: {}", json);
         } catch (Exception e) {
-
-            log.warn(
-                    "Failed to serialize sell request JSON",
-                    e
-            );
+            log.warn("Failed to serialize sell request JSON", e);
         }
 
-        BigDecimal netProceeds =
-                netSellProceeds(
-                        sellSize,
-                        currentBid
-                );
-
-        BigDecimal netProfitIfSold =
-                netProceeds.subtract(
-                        bet.amount()
-                );
+        BigDecimal netProceeds = netSellProceeds(sellSize, currentBid);
+        BigDecimal netProfitIfSold = netProceeds.subtract(bet.amount());
 
         log.info(
-                "REAL SELL submitting: id={} boughtOrderId={} slug={} side={} " +
-                        "tokenId={} bid={} recordedSize={} safeSize={} sellSize={} " +
-                        "originalAmount={} winChance={} holdValue={} sellValue={} " +
-                        "sellingEv={} threshold={} netProceeds={} profitIfSold={}",
+                "REAL SELL submitting: id={} boughtOrderId={} slug={} side={} tokenId={} bid={} recordedSize={} safeSize={} sellSize={} originalAmount={} winChance={} holdValue={} sellValue={} sellingEv={} threshold={} netProceeds={} profitIfSold={}",
                 clientOrderId,
                 bet.orderId(),
                 slug,
@@ -814,91 +463,53 @@ public class RealBetService {
         );
 
         ExecutionOrderResponse response;
-
         try {
-            response =
-                    executionWebClient.post()
-                            .uri("/order")
-                            .bodyValue(request)
-                            .retrieve()
-                            .bodyToMono(
-                                    ExecutionOrderResponse.class
-                            )
-                            .block(
-                                    Duration.ofSeconds(10)
-                            );
-
+            response = executionWebClient.post()
+                    .uri("/order")
+                    .bodyValue(request)
+                    .retrieve()
+                    .bodyToMono(ExecutionOrderResponse.class)
+                    .block(Duration.ofSeconds(10));
         } catch (WebClientResponseException e) {
-
-            String errorBody =
-                    e.getResponseBodyAsString();
-
-            log.error(
-                    "REAL SELL executor error response (status {}): {}",
-                    e.getStatusCode(),
-                    errorBody
-            );
-
-            throw new IllegalStateException(
-                    "Executor rejected sell order: "
-                            + errorBody,
-                    e
-            );
+            String errorBody = e.getResponseBodyAsString();
+            log.error("REAL SELL executor error response (status {}): {}", e.getStatusCode(), errorBody);
+            throw new IllegalStateException("Executor rejected sell order: " + errorBody, e);
         }
 
         if (response == null) {
-            throw new IllegalStateException(
-                    "Execution service returned empty response for sell"
-            );
+            throw new IllegalStateException("Execution service returned empty response for sell");
         }
-
         if (!response.success()) {
-            throw new IllegalStateException(
-                    "Polymarket sell order rejected: "
-                            + response.error()
-            );
+            throw new IllegalStateException("Polymarket sell order rejected: " + response.error());
+        }
+        if (response.orderId() == null || response.orderId().isBlank()) {
+            throw new IllegalStateException("Polymarket sell returned success but no order_id");
         }
 
-        if (response.orderId() == null
-                || response.orderId().isBlank()) {
-
-            throw new IllegalStateException(
-                    "Polymarket sell returned success but no order_id"
-            );
-        }
-
-        RealBet sold =
-                new RealBet(
-                        bet.id(),
-                        bet.orderId(),
-                        bet.tokenId(),
-                        slug,
-                        bet.side(),
-                        bet.amount(),
-                        bet.price(),
-                        bet.size(),
-                        bet.countedEv(),
-                        bet.countedWinChance(),
-                        bet.placedAt(),
-                        bet.secondsUntilClose(),
-                        RealBetStatus.SOLD,
-                        response.orderId(),
-                        currentBid,
-                        netProfitIfSold
-                );
-
-        bets.put(
+        RealBet sold = new RealBet(
                 bet.id(),
-                sold
+                bet.orderId(),
+                bet.tokenId(),
+                slug,
+                bet.side(),
+                bet.amount(),
+                bet.price(),
+                bet.size(),
+                bet.countedEv(),
+                bet.countedWinChance(),
+                bet.placedAt(),
+                bet.secondsUntilClose(),
+                BetStatus.SOLD,
+                response.orderId(),
+                currentBid,
+                netProfitIfSold
         );
 
+        bets.put(bet.id(), sold);
         openSlugs.remove(slug);
 
         log.info(
-                "REAL SELL ACCEPTED: id={} sellOrderId={} slug={} side={} " +
-                        "boughtAt={} soldAt={} winChance={} holdValue={} " +
-                        "sellValue={} sellingEv={} threshold={} profitLoss={} " +
-                        "(slot freed for re-entry)",
+                "REAL SELL ACCEPTED: id={} sellOrderId={} slug={} side={} boughtAt={} soldAt={} winChance={} holdValue={} sellValue={} sellingEv={} threshold={} profitLoss={} (slot freed for re-entry)",
                 bet.id(),
                 response.orderId(),
                 slug,
@@ -916,169 +527,36 @@ public class RealBetService {
         return sold;
     }
 
-    private BigDecimal netSellProceeds(
-            BigDecimal shares,
-            BigDecimal price
-    ) {
-        BigDecimal grossProceeds =
-                shares.multiply(price);
-
-        BigDecimal feeRate =
-                BigDecimal.valueOf(
-                        tradingProperties.takerFee()
-                );
-
-        BigDecimal fee =
-                shares
-                        .multiply(feeRate)
-                        .multiply(price)
-                        .multiply(
-                                BigDecimal.ONE.subtract(price)
-                        )
-                        .setScale(
-                                5,
-                                RoundingMode.HALF_UP
-                        );
-
+    private BigDecimal netSellProceeds(BigDecimal shares, BigDecimal price) {
+        BigDecimal grossProceeds = shares.multiply(price);
+        BigDecimal feeRate = BigDecimal.valueOf(tradingProperties.takerFee());
+        BigDecimal fee = shares
+                .multiply(feeRate)
+                .multiply(price)
+                .multiply(BigDecimal.ONE.subtract(price))
+                .setScale(5, RoundingMode.HALF_UP);
         return grossProceeds.subtract(fee);
     }
 
-    private BigDecimal getExecutablePrice(
-            PolymarketMarketSnapshot snapshot,
-            MarketSide side
-    ) {
-        BigDecimal price =
-                side == MarketSide.UP
-                        ? snapshot.upPrice()
-                        : snapshot.downPrice();
-
+    private BigDecimal getExecutablePrice(PolymarketMarketSnapshot snapshot, MarketSide side) {
+        BigDecimal price = side == MarketSide.UP ? snapshot.upPrice() : snapshot.downPrice();
         if (price == null) {
-            throw new IllegalStateException(
-                    "No executable "
-                            + side
-                            + " price available for "
-                            + snapshot.slug()
-            );
+            throw new IllegalStateException("No executable " + side + " price available for " + snapshot.slug());
         }
-
         return price;
     }
 
-    private void validatePrice(
-            BigDecimal price
-    ) {
-        if (price.compareTo(BigDecimal.ZERO) <= 0
-                || price.compareTo(BigDecimal.ONE) >= 0) {
-
-            throw new IllegalStateException(
-                    "Invalid Polymarket price: "
-                            + price
-            );
+    private void validatePrice(BigDecimal price) {
+        if (price.compareTo(BigDecimal.ZERO) <= 0 || price.compareTo(BigDecimal.ONE) >= 0) {
+            throw new IllegalStateException("Invalid Polymarket price: " + price);
         }
     }
 
-    private double round(
-            double value
-    ) {
-        return Math.round(
-                value * 10000.0
-        ) / 10000.0;
+    private double round(double value) {
+        return Math.round(value * 10000.0) / 10000.0;
     }
 
     public Map<String, RealBet> getBets() {
         return Map.copyOf(bets);
-    }
-
-    public record ExecutionOrderRequest(
-
-            @JsonProperty("client_order_id")
-            String clientOrderId,
-
-            @JsonProperty("market_slug")
-            String marketSlug,
-
-            @JsonProperty("token_id")
-            String tokenId,
-
-            String side,
-
-            String price,
-
-            String size,
-
-            @JsonProperty("amount_usdc")
-            String amountUsdc,
-
-            @JsonProperty("order_type")
-            String orderType,
-
-            @JsonProperty("amount")
-            String amount
-    ) {
-    }
-
-    public record ExecutionOrderResponse(
-
-            boolean success,
-
-            @JsonProperty("order_id")
-            String orderId,
-
-            String status,
-
-            String error,
-
-            @JsonProperty("making_amount")
-            BigDecimal makingAmount,
-
-            @JsonProperty("taking_amount")
-            BigDecimal takingAmount
-    ) {
-    }
-
-    public record RealBet(
-
-            String id,
-
-            @JsonProperty("order_id")
-            String orderId,
-
-            @JsonProperty("token_id")
-            String tokenId,
-
-            @JsonProperty("market_slug")
-            String marketSlug,
-
-            MarketSide side,
-
-            BigDecimal amount,
-
-            BigDecimal price,
-
-            BigDecimal size,
-
-            @JsonProperty("counted_ev")
-            double countedEv,
-
-            @JsonProperty("counted_win_chance")
-            double countedWinChance,
-
-            @JsonProperty("placed_at")
-            Instant placedAt,
-
-            @JsonProperty("seconds_until_close")
-            long secondsUntilClose,
-
-            RealBetStatus status,
-
-            @JsonProperty("sell_order_id")
-            String sellOrderId,
-
-            @JsonProperty("sold_price")
-            BigDecimal soldPrice,
-
-            @JsonProperty("profit_loss")
-            BigDecimal profitLoss
-    ) {
     }
 }

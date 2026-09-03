@@ -19,7 +19,7 @@ public class TasksRunner implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) {
         log.info("No historical backfill available for free (Chainlink Data Streams REST requires paid/sponsored " +
-                "credentials; Polymarket RTDS sends no backlog on subscribe) — starting live data collection directly.");
+                "credentials; Polymarket RTDS sends no backlog on subscribe) - starting live data collection directly.");
         liveMarketDataService.start();
     }
 }

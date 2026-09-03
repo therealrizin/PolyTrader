@@ -3,10 +3,11 @@ package al.r1.polytrader.services;
 import al.r1.polytrader.config.model.TradingProperties;
 import al.r1.polytrader.engine.TradingEngine;
 import al.r1.polytrader.engine.model.MarketSide;
-import al.r1.polytrader.engine.model.UpDownEvEstimate;
+import al.r1.polytrader.engine.model.EvEstimate;
 import al.r1.polytrader.services.betting.MockBetService;
 import al.r1.polytrader.services.betting.RealBetService;
 import al.r1.polytrader.services.betting.model.MockBet;
+import al.r1.polytrader.services.betting.model.RealBet;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.PolymarketDataProvider;
@@ -108,7 +109,7 @@ public class TradingDecisionService {
                 if (!realBetService.hasOpenBetFor(snapshot.slug())) {
                     logSellSkip("NO_OPEN_BET", snapshot.slug(), "real mode");
                 } else {
-                    Optional<RealBetService.RealBet> sold = realBetService.sellOpenPosition(snapshot);
+                    Optional<RealBet> sold = realBetService.sellOpenPosition(snapshot);
                     sold.ifPresentOrElse(
                             bet -> log.info("DECISION action=SOLD (REAL) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
                                     bet.marketSlug(), bet.side(), bet.price(),
@@ -164,7 +165,7 @@ public class TradingDecisionService {
             BigDecimal currentLivePrice = prices.getPrice(SYMBOL);
             BigDecimal currentTwapPrice = prices.getAvg60sPrice(SYMBOL);
 
-            UpDownEvEstimate estimate = tradingEngine.estimateUpDown(
+            EvEstimate estimate = tradingEngine.estimateUpDown(
                     currentLivePrice,
                     currentTwapPrice,
                     snapshot.strikePriceUsd(),
@@ -238,12 +239,6 @@ public class TradingDecisionService {
         }
     }
 
-    /**
-     * Returns the effective EV threshold based on the recommended win chance.
-     * - ≥ 90% → threshold = minEv / 3
-     * - ≥ 80% → threshold = minEv * 2/3
-     * - otherwise → threshold = minEv
-     */
     private double getEffectiveEvThreshold(double winChance) {
         double minEv = tradingProperties.minimumExpectedEv();
         if (winChance >= 0.90) {

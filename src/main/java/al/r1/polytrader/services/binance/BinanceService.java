@@ -36,12 +36,6 @@ public class BinanceService {
 
     private static final Duration RECONNECT_DELAY = Duration.ofSeconds(5);
 
-    // BTCUSDT trades multiple times per second on Binance in normal
-    // conditions. If we go this long with no message on an ostensibly-open
-    // session, treat it as dead rather than trust the transport-level
-    // callbacks, which don't always fire for a half-open socket or a
-    // client that's been silently torn down by the underlying JSR-356
-    // implementation.
     private static final Duration STALE_THRESHOLD = Duration.ofSeconds(10);
     private static final Duration STALENESS_CHECK_INTERVAL = Duration.ofSeconds(3);
 
@@ -57,14 +51,6 @@ public class BinanceService {
 
     private final Map<CurrencyPairs, Long> lastMessageAtMillis = new ConcurrentHashMap<>();
     private final Map<CurrencyPairs, AtomicReference<WebSocketSession>> sessions = new ConcurrentHashMap<>();
-
-    // IMPORTANT: the JSR-356 client implementation backing
-    // StandardWebSocketClient (Tyrus) can tear a connection down without
-    // firing afterConnectionClosed/handleTransportError if nothing holds a
-    // strong reference to the WebSocketClient itself for the life of the
-    // connection. Previously this was a local variable in
-    // connectPriceStream() and became eligible for GC as soon as the method
-    // returned — keeping it here fixes silent, un-notified disconnects.
     private final Map<CurrencyPairs, WebSocketClient> clients = new ConcurrentHashMap<>();
 
     public BinanceService(@Qualifier("binanceWebClient") WebClient webClient, ObjectMapper objectMapper,
@@ -137,12 +123,6 @@ public class BinanceService {
         }, url);
     }
 
-    /**
-     * Backstop for disconnects that the transport callbacks above don't
-     * catch. Since BTCUSDT trades continuously, silence beyond
-     * STALE_THRESHOLD on a pair we're actively subscribed to is itself the
-     * failure signal.
-     */
     private void checkStaleness() {
         long now = System.currentTimeMillis();
         for (CurrencyPairs symbol : lastMessageAtMillis.keySet()) {

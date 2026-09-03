@@ -92,17 +92,6 @@ public class TradingDecisionService {
 
             PolymarketMarketSnapshot snapshot = snapshotOpt.get();
 
-            /*
-             * SELL CHECK — runs every tick, ahead of every buy-side guard
-             * below (secondsSinceOpen, secondsUntilClose, already-open, etc).
-             *
-             * Selling closes a KNOWN, certain outcome at the current bid.
-             * Win chance is irrelevant; only the realized EV matters, and
-             * it's judged against the same minimumExpectedEv threshold
-             * used for entries. A successful sell frees this slug's slot
-             * immediately, so the buy-side logic below can re-enter the
-             * same window in this very tick if a fresh edge exists.
-             */
             if (tradingProperties.mock()) {
                 if (!mockBetService.hasOpenBetFor(snapshot.slug())) {
                     logSellSkip("NO_OPEN_BET", snapshot.slug(), "mock mode");
@@ -258,10 +247,14 @@ public class TradingDecisionService {
     private double getEffectiveEvThreshold(double winChance) {
         double minEv = tradingProperties.minimumExpectedEv();
         if (winChance >= 0.90) {
-            return minEv / 3.0;
+            return minEv / 5.0;
+        } else if (winChance >= 0.85) {
+            return minEv / 4.0;
         } else if (winChance >= 0.80) {
-            return minEv * 2.0 / 3.0;
-        } else {
+            return minEv / 3.0;
+        }else if (winChance >= 0.75) {
+            return minEv / 2.0;
+        }else {
             return minEv;
         }
     }

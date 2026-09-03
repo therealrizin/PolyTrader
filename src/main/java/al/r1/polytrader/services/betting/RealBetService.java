@@ -38,6 +38,15 @@ public class RealBetService {
     private final Map<String, RealBet> bets =
             new ConcurrentHashMap<>();
 
+    /*
+     * Sell at most this fraction of the recorded position size, as a
+     * buffer against fill/balance accounting drift not fully captured
+     * by using the executor's actual fill amount (see placeRealBet).
+     * 0.995 = sell up to 99.5% of the recorded shares.
+     */
+    private static final BigDecimal SELL_SAFETY_MARGIN =
+            new BigDecimal("0.995");
+
     public RealBetService(
             TradingProperties tradingProperties,
             PolymarketMarketResolver marketResolver,
@@ -223,6 +232,22 @@ public class RealBetService {
             Instant placedAt =
                     Instant.now();
 
+            BigDecimal actualSize =
+                    (response.takingAmount() != null
+                            && response.takingAmount().signum() > 0)
+                            ? response.takingAmount()
+                            : size;
+
+            if (actualSize.compareTo(size) != 0) {
+                log.info(
+                        "REAL BET actual fill size differs from estimate: "
+                                + "id={} slug={} estimatedSize={} actualFillSize={} "
+                                + "(makingAmount={} takingAmount={})",
+                        clientBetId, slug, size, actualSize,
+                        response.makingAmount(), response.takingAmount()
+                );
+            }
+
             RealBet bet =
                     new RealBet(
                             clientBetId,
@@ -232,7 +257,7 @@ public class RealBetService {
                             side,
                             amount,
                             price,
-                            size,
+                            actualSize,
                             countedEv,
                             countedWinChance,
                             placedAt,
@@ -248,13 +273,13 @@ public class RealBetService {
                     bet);
 
             log.info(
-                    "REAL BET ACCEPTED: id={} orderId={} slug={} side={} price={} size={} amount={}",
+                    "REAL BET ACCEPTED: id={} orderId={} slug={} side={} price={} recordedSize={} amount={}",
                     clientBetId,
                     response.orderId(),
                     slug,
                     side,
                     price,
-                    size,
+                    actualSize,
                     amount
             );
 
@@ -392,13 +417,24 @@ public class RealBetService {
     ) {
         String slug = bet.marketSlug();
 
+        BigDecimal safeHeldSize =
+                bet.size().multiply(SELL_SAFETY_MARGIN);
+
+        BigDecimal sellSize =
+                safeHeldSize.setScale(2, RoundingMode.DOWN);
+
+        if (sellSize.signum() <= 0) {
+            throw new IllegalStateException(
+                    "Position size " + bet.size()
+                            + " rounds down to zero sellable shares (2 decimal limit)");
+        }
+
         BigDecimal amountUsdc =
-                bet.size().multiply(currentBid)
+                sellSize.multiply(currentBid)
                         .setScale(2, RoundingMode.HALF_UP);
 
         String clientOrderId = UUID.randomUUID().toString();
 
-        // For sell orders, we MUST provide the 'amount' field (shares)
         ExecutionOrderRequest request =
                 new ExecutionOrderRequest(
                         clientOrderId,
@@ -406,10 +442,10 @@ public class RealBetService {
                         bet.tokenId(),
                         "SELL",
                         currentBid.toPlainString(),
-                        bet.size().toPlainString(),   // size in shares
+                        sellSize.toPlainString(),     // size in shares (2dp)
                         amountUsdc.toPlainString(),   // estimated USDC proceeds
                         "FOK",
-                        bet.size().toPlainString()    // amount = shares (fixes the error)
+                        sellSize.toPlainString()      // amount = shares (2dp, fixes the error)
                 );
 
         try {
@@ -421,9 +457,11 @@ public class RealBetService {
 
         log.info(
                 "REAL SELL submitting: id={} boughtOrderId={} slug={} side={} tokenId={} " +
-                        "bid={} size={} originalAmount={} netProfitIfSold={} sellingEv={} threshold={}",
+                        "bid={} recordedSize={} safeSize={} sellSize={} originalAmount={} " +
+                        "netProfitIfSold={} sellingEv={} threshold={}",
                 clientOrderId, bet.orderId(), slug, bet.side(), bet.tokenId(),
-                currentBid, bet.size(), bet.amount(), netProfitIfSold, sellingEv,
+                currentBid, bet.size(), safeHeldSize, sellSize, bet.amount(),
+                netProfitIfSold, sellingEv,
                 tradingProperties.minimumExpectedEv()
         );
 
@@ -487,8 +525,6 @@ public class RealBetService {
 
         bets.put(bet.id(), sold);
 
-        // Free the slot: allows re-entry into the same window on the very
-        // next evaluation tick.
         openSlugs.remove(slug);
 
         log.info(

@@ -29,6 +29,9 @@ services:
 
 trading:
   mock: ${TRADING_MOCK:true}
+  # Required minEv will decrease from minWinChance up to 90% win chance where it achieves 5x less value
+  # It exists to actually buy anything when at positive EV and bet is not yet placed
+  # Ev at 90% winrate rarely touches 0.1, usually keeping around 0.05
   minimum-expected-ev: ${TRADING_MINIMUM_EXPECTED_EV:0.40}
   minimum-win-chance: ${TRADING_MINIMUM_WIN_CHANCE:0.20}
   taker-fee: ${TRADING_TAKER_FEE:0.07}

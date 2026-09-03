@@ -241,17 +241,19 @@ public class TradingDecisionService {
 
     private double getEffectiveEvThreshold(double winChance) {
         double minEv = tradingProperties.minimumExpectedEv();
-        if (winChance >= 0.90) {
-            return minEv / 5.0;
-        } else if (winChance >= 0.85) {
-            return minEv / 4.0;
-        } else if (winChance >= 0.80) {
-            return minEv / 3.0;
-        }else if (winChance >= 0.75) {
-            return minEv / 2.0;
-        }else {
+        double minWinChance = tradingProperties.minimumWinChance();
+
+        if (winChance <= minWinChance) {
             return minEv;
         }
+
+        if (winChance >= 0.90) {
+            return minEv / 5.0;
+        }
+
+        double progress = (winChance - minWinChance) / (0.90 - minWinChance);
+
+        return minEv * (1.0 - progress * 0.8);
     }
 
     // Buy-side skip logging

@@ -13,21 +13,8 @@ public class TradingEngine {
     private static final int TWAP_WINDOW_SECONDS = 60;
 
     /*
-     * The probability table contains a 0.001% movement bucket.
-     *
-     * A movement inside half of that bucket is effectively zero from
-     * the perspective of the model and must NOT be interpreted as
-     * either UP or DOWN.
-     *
-     * Otherwise:
-     *
-     *     +0.000%
-     *         -> table.getChance(..., 0)
-     *         -> ~0.47%
-     *         -> 1 - 0.47%
-     *         -> ~99.5% DOWN/UP
-     *
-     * which is exactly the false ~99.5% probability we were seeing.
+     * Movement smaller than half of the 0.001% bucket is considered
+     * directionless.
      */
     private static final double ZERO_MOVEMENT_THRESHOLD_PERCENT = 0.0005;
 
@@ -55,13 +42,13 @@ public class TradingEngine {
 
         double downChance = 1.0 - upChance;
 
-        double upEv = evForSide(
+        double upEv = evForBuySide(
                 upChance,
                 upMarketPrice,
                 takerFee
         );
 
-        double downEv = evForSide(
+        double downEv = evForBuySide(
                 downChance,
                 downMarketPrice,
                 takerFee
@@ -92,20 +79,8 @@ public class TradingEngine {
     }
 
     /**
-     * Estimates the probability that the final 60-second TWAP will be
-     * above the opening/reference price.
-     *
-     * The model works in two stages:
-     *
-     * 1. Use the probability table to estimate where the LIVE BTC price
-     *    can be when the market resolves.
-     *
-     * 2. Convert that future live price into the expected final 60s TWAP,
-     *    taking into account how many seconds are left.
-     *
-     * The closer we get to the end of the market, the less influence the
-     * future live price has on the final TWAP because most of the 60-second
-     * averaging window has already happened.
+     * Returns the probability that the final Chainlink 60-second TWAP
+     * will finish above the opening/reference price.
      */
     private double estimatedUpChance(
             BigDecimal currentLivePrice,
@@ -118,23 +93,27 @@ public class TradingEngine {
                 || referencePrice == null
                 || currentLivePrice.signum() <= 0
                 || currentTwapPrice.signum() <= 0) {
+
             return 0.5;
         }
 
-        secondsLeft = Math.max(0, secondsLeft);
+        secondsLeft = Math.clamp(
+                secondsLeft,
+                0,
+                300
+        );
 
         /*
-         * If there is at least one complete TWAP window remaining,
-         * the current TWAP has effectively lost its importance.
-         *
-         * The future live price is the important variable.
+         * If >= 60 seconds remain, the current TWAP has effectively
+         * disappeared from the final TWAP.
          */
         if (secondsLeft >= TWAP_WINDOW_SECONDS) {
 
-            double requiredPctChange = percentageChange(
-                    currentLivePrice,
-                    referencePrice
-            );
+            double requiredPctChange =
+                    percentageChange(
+                            currentLivePrice,
+                            referencePrice
+                    );
 
             return probabilityOfReaching(
                     requiredPctChange,
@@ -143,38 +122,31 @@ public class TradingEngine {
         }
 
         /*
-         * We have less than 60 seconds remaining.
+         * Less than one minute remains.
          *
-         * The current TWAP is already partially determined by historical
-         * prices. Only observations arriving during the remaining seconds
-         * can move it toward the future live price.
+         * Approximate the final TWAP as:
          *
-         * Approximation:
+         * finalTWAP =
+         *     currentTWAP * (1 - w)
+         *     + futureLivePrice * w
          *
-         *     finalTWAP =
-         *         currentTWAP * (1 - futureWeight)
-         *         +
-         *         futureLivePrice * futureWeight
-         *
-         * where:
-         *
-         *     futureWeight = secondsLeft / 60
-         *
-         * Therefore calculate which future LIVE price would be required
-         * for the final TWAP to reach the strike.
+         * where w = secondsLeft / 60.
          */
         double futureWeight =
                 (double) secondsLeft / TWAP_WINDOW_SECONDS;
 
-        /*
-         * At exactly zero seconds there is no future data that can change
-         * the TWAP anymore.
-         */
         if (futureWeight <= 0.0) {
+
             return currentTwapPrice.compareTo(referencePrice) > 0
                     ? 1.0
                     : 0.0;
         }
+
+        double currentTwap =
+                currentTwapPrice.doubleValue();
+
+        double reference =
+                referencePrice.doubleValue();
 
         /*
          * Solve:
@@ -182,32 +154,21 @@ public class TradingEngine {
          * reference =
          *     currentTwap * (1 - w)
          *     + futureLive * w
-         *
-         * for futureLive:
-         *
-         * futureLive =
-         *     (reference - currentTwap * (1 - w)) / w
          */
-        double currentTwap =
-                currentTwapPrice.doubleValue();
-
-        double reference =
-                referencePrice.doubleValue();
-
         double requiredFutureLivePrice =
-                (reference
-                        - currentTwap * (1.0 - futureWeight))
-                        / futureWeight;
+                (
+                        reference
+                                - currentTwap * (1.0 - futureWeight)
+                ) / futureWeight;
 
-        /*
-         * Calculate the percentage movement required from the current
-         * live BTC price to reach that future live price.
-         */
+        double currentLive =
+                currentLivePrice.doubleValue();
+
         double requiredPctChange =
-                ((requiredFutureLivePrice
-                        - currentLivePrice.doubleValue())
-                        / currentLivePrice.doubleValue())
-                        * 100.0;
+                (
+                        (requiredFutureLivePrice - currentLive)
+                                / currentLive
+                ) * 100.0;
 
         return probabilityOfReaching(
                 requiredPctChange,
@@ -215,44 +176,18 @@ public class TradingEngine {
         );
     }
 
-    /**
-     * Converts a required percentage movement of the live BTC price into
-     * the probability supplied by the historical probability table.
-     *
-     * IMPORTANT:
-     *
-     * The probability table contains movement buckets, for example:
-     *
-     *     -0.001%
-     *      0.000%
-     *     +0.001%
-     *
-     * The 0.000% bucket is NOT an UP/DOWN probability.
-     *
-     * It represents observations whose movement rounded into the zero
-     * movement bucket. Therefore it must never be passed into
-     * getChance() and then interpreted as a directional probability.
-     *
-     * When the required movement is effectively zero, the model has
-     * no directional edge and returns 50/50.
-     */
     private double probabilityOfReaching(
             double requiredPctChange,
             int secondsLeft
     ) {
-        secondsLeft = Math.clamp(secondsLeft, 0, 300);
+        secondsLeft = Math.clamp(
+                secondsLeft,
+                0,
+                300
+        );
 
         /*
-         * ZERO MOVEMENT
-         *
-         * Do this BEFORE calling table.getChance().
-         *
-         * This fixes the ~99.5% bug caused by:
-         *
-         *     getChance(..., 0.0)
-         *
-         * where the 0.000% bucket currently contains only ~0.47%
-         * of observations.
+         * No meaningful directional movement required.
          */
         if (Math.abs(requiredPctChange)
                 < ZERO_MOVEMENT_THRESHOLD_PERCENT) {
@@ -261,17 +196,14 @@ public class TradingEngine {
         }
 
         /*
-         * Negative required movement:
+         * We need DOWN movement.
          *
-         * We need the future live price to move DOWN by at least
-         * |requiredPctChange|.
-         *
-         * table.getChance() represents the probability of reaching
-         * that movement magnitude in the corresponding direction.
+         * getChance() returns the probability of reaching the requested
+         * magnitude in that direction.
          *
          * Therefore:
          *
-         *     P(UP) = 1 - P(DOWN)
+         * P(UP) = 1 - P(DOWN)
          */
         if (requiredPctChange < 0.0) {
 
@@ -287,10 +219,7 @@ public class TradingEngine {
         }
 
         /*
-         * Positive required movement:
-         *
-         * We need the future live price to move UP by at least
-         * requiredPctChange.
+         * We need UP movement.
          */
         double probabilityUp =
                 table.getChance(
@@ -319,16 +248,34 @@ public class TradingEngine {
                 .doubleValue();
     }
 
-    private double evForSide(
+    /**
+     * EV of BUYING a share at marketPrice.
+     *
+     * This is the same entry EV used by the trading decision.
+     */
+    private double evForBuySide(
             double winChance,
             double marketPrice,
             double takerFee
     ) {
         if (marketPrice <= 0.0
                 || marketPrice >= 1.0) {
+
             return Double.NEGATIVE_INFINITY;
         }
 
+        /*
+         * Binary share pays $1 if it wins.
+         *
+         * Gross expected payout per $1 invested:
+         *
+         *     winChance / price
+         *
+         * The fee is applied to the trade at match time.
+         *
+         * This retains the same general EV convention your bot
+         * currently uses while keeping the fee parameter explicit.
+         */
         double grossPayout =
                 1.0 / marketPrice;
 
@@ -341,18 +288,102 @@ public class TradingEngine {
     }
 
     /**
-     * Protect the trading engine from numerical errors or malformed
-     * probability-table values.
+     * Returns the value of HOLDING one share to resolution.
+     *
+     * A winning share pays $1.
+     * A losing share pays $0.
+     *
+     * Therefore:
+     *
+     *     EV(hold) = P(win)
      */
+    public double holdValuePerShare(
+            double winChance
+    ) {
+        return clampProbability(winChance);
+    }
+
+    /**
+     * Calculates how much better/worse SELLING one share now is compared
+     * with HOLDING that same share to resolution.
+     *
+     * Positive:
+     *
+     *     selling now > expected value of holding
+     *
+     * Negative:
+     *
+     *     holding > selling now
+     *
+     * This is deliberately expressed per share rather than relative to
+     * the original purchase price.
+     */
+    public double sellAdvantagePerShare(
+            double winChance,
+            double currentBid,
+            double takerFee
+    ) {
+        if (currentBid <= 0.0
+                || currentBid >= 1.0) {
+
+            return Double.NEGATIVE_INFINITY;
+        }
+
+        double holdValue =
+                holdValuePerShare(winChance);
+
+        double sellValue =
+                netSellValuePerShare(
+                        currentBid,
+                        takerFee
+                );
+
+        return sellValue - holdValue;
+    }
+
+    /**
+     * Expected net value received for one share when selling at the
+     * current bid.
+     *
+     * Polymarket crypto taker fees are calculated as:
+     *
+     *     fee = shares * rate * p * (1-p)
+     *
+     * Therefore for one share:
+     *
+     *     fee = rate * p * (1-p)
+     */
+    public double netSellValuePerShare(
+            double currentBid,
+            double takerFee
+    ) {
+        if (currentBid <= 0.0
+                || currentBid >= 1.0) {
+
+            return 0.0;
+        }
+
+        double fee =
+                takerFee
+                        * currentBid
+                        * (1.0 - currentBid);
+
+        return currentBid - fee;
+    }
+
     private double clampProbability(
             double probability
     ) {
         if (Double.isNaN(probability)
                 || Double.isInfinite(probability)) {
+
             return 0.5;
         }
 
-        return Math.clamp(probability,
-                0.0, 1.0);
+        return Math.clamp(
+                probability,
+                0.0,
+                1.0
+        );
     }
 }

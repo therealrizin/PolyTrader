@@ -4,7 +4,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
-import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -12,6 +11,7 @@ import java.util.Deque;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 @Slf4j
@@ -30,9 +30,27 @@ public class Prices {
 
     private static final int HISTORY_SIZE = 60;
 
+    /*
+     * A price is considered usable for a REAL BUY only if our application
+     * received/processes the RTDS price no more than this long ago.
+     *
+     * 500 ms = 0.5 seconds.
+     */
+    public static final long MAX_PRICE_AGE_MILLIS = 500L;
+
+    /*
+     * Protect against a broken clock / malformed RTDS timestamp.
+     *
+     * We allow a very small amount of clock skew, but a timestamp more
+     * than this into the future is not considered valid.
+     */
+    private static final long MAX_FUTURE_SKEW_MILLIS = 1_000L;
+
     private record SymbolState(
             AtomicReference<BigDecimal> price,
             AtomicReference<BigDecimal> avg60sPrice,
+            AtomicLong lastObservedAtMillis,
+            AtomicLong lastPriceReceivedAtMillis,
             Deque<PriceObservation> rawHistory,
             Deque<PricePoint> history
     ) {
@@ -40,6 +58,8 @@ public class Prices {
             return new SymbolState(
                     new AtomicReference<>(),
                     new AtomicReference<>(),
+                    new AtomicLong(0L),
+                    new AtomicLong(0L),
                     new ArrayDeque<>(),
                     new ArrayDeque<>()
             );
@@ -78,21 +98,40 @@ public class Prices {
     /**
      * Updates the current raw price without timestamped history.
      *
-     * Kept for compatibility with existing callers.
+     * IMPORTANT:
+     *
+     * This method intentionally does NOT update the RTDS timestamp or
+     * local freshness timestamp.
+     *
+     * Therefore a caller using this legacy method can never make an
+     * otherwise stale price appear fresh enough for real betting.
      */
-    public void updatePrice(ChainlinkSymbol symbol, BigDecimal price) {
+    public void updatePrice(
+            ChainlinkSymbol symbol,
+            BigDecimal price
+    ) {
         if (symbol == null || price == null) {
             return;
         }
 
-        states.get(symbol).price().set(price);
+        SymbolState state = states.get(symbol);
+
+        if (state == null) {
+            return;
+        }
+
+        state.price().set(price);
     }
 
     /**
      * Updates the current raw price and stores the exact RTDS observation
      * timestamp.
      *
-     * This is the method ChainlinkPriceStreamClient should use.
+     * The RTDS timestamp is preserved for historical purposes.
+     *
+     * Freshness is based on the LOCAL timestamp recorded when this method
+     * processes the RTDS price, because RTDS timestamps have only
+     * second-level precision in the received payload.
      */
     public synchronized void updatePrice(
             ChainlinkSymbol symbol,
@@ -105,16 +144,50 @@ public class Prices {
 
         SymbolState state = states.get(symbol);
 
+        if (state == null) {
+            return;
+        }
+
+        /*
+         * This is the timestamp that matters for the 500 ms freshness
+         * requirement.
+         *
+         * Do NOT use observedAtMillis here.
+         */
+        long receivedAtMillis =
+                System.currentTimeMillis();
+
         state.price().set(price);
 
-        state.rawHistory().addLast(
-                new PriceObservation(observedAtMillis, price)
+        /*
+         * Keep the provider/RTDS timestamp separately.
+         */
+        state.lastObservedAtMillis().set(
+                observedAtMillis
         );
 
-        long cutoff = observedAtMillis - RAW_HISTORY_RETENTION_MILLIS;
+        /*
+         * Keep the local receipt/processing timestamp separately.
+         */
+        state.lastPriceReceivedAtMillis().set(
+                receivedAtMillis
+        );
+
+        state.rawHistory().addLast(
+                new PriceObservation(
+                        observedAtMillis,
+                        price
+                )
+        );
+
+        long cutoff =
+                observedAtMillis
+                        - RAW_HISTORY_RETENTION_MILLIS;
 
         while (!state.rawHistory().isEmpty()
-                && state.rawHistory().peekFirst().observedAtMillis() < cutoff) {
+                && state.rawHistory()
+                .peekFirst()
+                .observedAtMillis() < cutoff) {
 
             state.rawHistory().pollFirst();
         }
@@ -128,17 +201,179 @@ public class Prices {
             return;
         }
 
-        states.get(symbol).avg60sPrice().set(avg60sPrice);
+        SymbolState state = states.get(symbol);
+
+        if (state == null) {
+            return;
+        }
+
+        state.avg60sPrice().set(avg60sPrice);
     }
 
-    public BigDecimal getPrice(ChainlinkSymbol symbol) {
+    public BigDecimal getPrice(
+            ChainlinkSymbol symbol
+    ) {
         SymbolState state = states.get(symbol);
-        return state == null ? null : state.price().get();
+
+        return state == null
+                ? null
+                : state.price().get();
     }
 
-    public BigDecimal getAvg60sPrice(ChainlinkSymbol symbol) {
+    public BigDecimal getAvg60sPrice(
+            ChainlinkSymbol symbol
+    ) {
         SymbolState state = states.get(symbol);
-        return state == null ? null : state.avg60sPrice().get();
+
+        return state == null
+                ? null
+                : state.avg60sPrice().get();
+    }
+
+    /**
+     * Returns the timestamp of the latest RTDS observation.
+     *
+     * This is the PROVIDER timestamp and is intentionally NOT used
+     * for the 500 ms freshness check.
+     *
+     * Returns 0 when no timestamped RTDS price has ever been received.
+     */
+    public synchronized long getLastPriceTimestampMillis(
+            ChainlinkSymbol symbol
+    ) {
+        SymbolState state = states.get(symbol);
+
+        if (state == null) {
+            return 0L;
+        }
+
+        return state.lastObservedAtMillis().get();
+    }
+
+    /**
+     * Returns the LOCAL timestamp at which our application received/
+     * processed the latest timestamped RTDS raw price.
+     *
+     * This timestamp is used for real-order freshness checks.
+     */
+    public synchronized long getLastPriceReceivedTimestampMillis(
+            ChainlinkSymbol symbol
+    ) {
+        SymbolState state = states.get(symbol);
+
+        if (state == null) {
+            return 0L;
+        }
+
+        return state.lastPriceReceivedAtMillis().get();
+    }
+
+    /**
+     * Returns the age of the latest RTDS price based on when our
+     * application received/processed it.
+     *
+     * This deliberately does NOT use the RTDS payload timestamp because
+     * that timestamp has second-level precision.
+     *
+     * Returns Long.MAX_VALUE if no timestamped price exists.
+     */
+    public synchronized long getPriceAgeMillis(
+            ChainlinkSymbol symbol
+    ) {
+        SymbolState state = states.get(symbol);
+
+        if (state == null) {
+            return Long.MAX_VALUE;
+        }
+
+        long receivedAtMillis =
+                state.lastPriceReceivedAtMillis().get();
+
+        if (receivedAtMillis <= 0) {
+            return Long.MAX_VALUE;
+        }
+
+        return Math.max(
+                0L,
+                System.currentTimeMillis()
+                        - receivedAtMillis
+        );
+    }
+
+    /**
+     * Returns true only when:
+     *
+     *   1. A timestamped RTDS price exists.
+     *   2. The RTDS observation timestamp is not too far in the future.
+     *   3. Our application received/processed the price no more than
+     *      500 ms ago.
+     *
+     * This is intended for REAL order submission.
+     */
+    public synchronized boolean isPriceFresh(
+            ChainlinkSymbol symbol
+    ) {
+        SymbolState state = states.get(symbol);
+
+        if (state == null) {
+            return false;
+        }
+
+        long observedAtMillis =
+                state.lastObservedAtMillis().get();
+
+        long receivedAtMillis =
+                state.lastPriceReceivedAtMillis().get();
+
+        if (observedAtMillis <= 0
+                || receivedAtMillis <= 0) {
+
+            return false;
+        }
+
+        long now =
+                System.currentTimeMillis();
+
+        /*
+         * Reject obviously invalid future RTDS timestamps.
+         *
+         * This check is only for timestamp validity.
+         * Freshness itself is checked using receivedAtMillis below.
+         */
+        if (observedAtMillis
+                > now + MAX_FUTURE_SKEW_MILLIS) {
+
+            return false;
+        }
+
+        /*
+         * ACTUAL REAL-TRADING SAFETY CHECK:
+         *
+         * The price must have been received by OUR APPLICATION
+         * within the last 500 ms.
+         */
+        long age =
+                now - receivedAtMillis;
+
+        return age >= 0
+                && age <= MAX_PRICE_AGE_MILLIS;
+    }
+
+    /**
+     * Returns the latest timestamped RTDS observation.
+     */
+    public synchronized PriceObservation getLatestRawPrice(
+            ChainlinkSymbol symbol
+    ) {
+        SymbolState state = states.get(symbol);
+
+        if (state == null
+                || state.rawHistory().isEmpty()) {
+
+            return null;
+        }
+
+        return state.rawHistory().peekLast();
     }
 
     /**
@@ -158,14 +393,20 @@ public class Prices {
     ) {
         SymbolState state = states.get(symbol);
 
-        if (state == null || state.rawHistory().isEmpty()) {
+        if (state == null
+                || state.rawHistory().isEmpty()) {
+
             return null;
         }
 
         PriceObservation result = null;
 
-        for (PriceObservation observation : state.rawHistory()) {
-            if (observation.observedAtMillis() > targetTimestampMillis) {
+        for (PriceObservation observation :
+                state.rawHistory()) {
+
+            if (observation.observedAtMillis()
+                    > targetTimestampMillis) {
+
                 break;
             }
 
@@ -186,17 +427,23 @@ public class Prices {
     ) {
         SymbolState state = states.get(symbol);
 
-        if (state == null || state.rawHistory().isEmpty()) {
+        if (state == null
+                || state.rawHistory().isEmpty()) {
+
             return null;
         }
 
         PriceObservation closest = null;
         long closestDistance = Long.MAX_VALUE;
 
-        for (PriceObservation observation : state.rawHistory()) {
-            long distance = Math.abs(
-                    observation.observedAtMillis() - targetTimestampMillis
-            );
+        for (PriceObservation observation :
+                state.rawHistory()) {
+
+            long distance =
+                    Math.abs(
+                            observation.observedAtMillis()
+                                    - targetTimestampMillis
+                    );
 
             if (distance < closestDistance) {
                 closest = observation;
@@ -216,7 +463,9 @@ public class Prices {
             return List.of();
         }
 
-        return new ArrayList<>(state.rawHistory());
+        return new ArrayList<>(
+                state.rawHistory()
+        );
     }
 
     public synchronized void recordSnapshot(
@@ -251,7 +500,9 @@ public class Prices {
             return List.of();
         }
 
-        return new ArrayList<>(state.history());
+        return new ArrayList<>(
+                state.history()
+        );
     }
 
     // ------------------------------------------------------------------
@@ -266,18 +517,33 @@ public class Prices {
             return;
         }
 
-        providerPrices.put(provider, price);
+        providerPrices.put(
+                provider,
+                price
+        );
     }
 
-    public void setBinancePrice(BigDecimal price) {
-        setProviderPrice(PriceProviders.BINANCE, price);
+    public void setBinancePrice(
+            BigDecimal price
+    ) {
+        setProviderPrice(
+                PriceProviders.BINANCE,
+                price
+        );
     }
 
-    public void setPolymarketPrice(BigDecimal price) {
-        setProviderPrice(PriceProviders.POLYMARKET, price);
+    public void setPolymarketPrice(
+            BigDecimal price
+    ) {
+        setProviderPrice(
+                PriceProviders.POLYMARKET,
+                price
+        );
     }
 
-    public BigDecimal getProviderPrice(PriceProviders provider) {
+    public BigDecimal getProviderPrice(
+            PriceProviders provider
+    ) {
         return providerPrices.get(provider);
     }
 }

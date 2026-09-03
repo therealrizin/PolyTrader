@@ -19,6 +19,7 @@ import org.springframework.stereotype.Service;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicReference;
@@ -59,7 +60,6 @@ public class TradingDecisionService {
         this.liveDataTaskScheduler = liveDataTaskScheduler;
     }
 
-
     public void start() {
         ScheduledFuture<?> future = liveDataTaskScheduler.scheduleAtFixedRate(
                 this::evaluateAndMaybeBet,
@@ -93,19 +93,22 @@ public class TradingDecisionService {
 
             PolymarketMarketSnapshot snapshot = snapshotOpt.get();
 
+            // ------------------------------------------------------------
+            // SELL LOGIC – multi‑strategy for mock, single for real
+            // ------------------------------------------------------------
             if (tradingProperties.mock()) {
-                if (!mockBetService.hasOpenBetFor(snapshot.slug())) {
-                    logSellSkip("NO_OPEN_BET", snapshot.slug(), "mock mode");
+                List<MockBet> soldBets = mockBetService.evaluateSellForAllStrategies(snapshot);
+                if (!soldBets.isEmpty()) {
+                    for (MockBet bet : soldBets) {
+                        log.info("DECISION action=SOLD (MOCK) strategy={} slug={} side={} boughtAt={} soldAt={} profitLoss={}",
+                                bet.strategyId(), bet.marketSlug(), bet.side(),
+                                bet.marketPriceAtBet(), bet.priceAtResolution(), bet.profitLoss());
+                    }
                 } else {
-                    Optional<MockBet> sold = mockBetService.maybeSellOpenPosition(snapshot);
-                    sold.ifPresentOrElse(
-                            bet -> log.info("DECISION action=SOLD (MOCK) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
-                                    bet.marketSlug(), bet.side(), bet.marketPriceAtBet(),
-                                    bet.priceAtResolution(), bet.profitLoss()),
-                            () -> logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "mock sell check returned empty (EV < threshold)")
-                    );
+                    logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "no mock strategy met sell EV");
                 }
             } else {
+                // Real mode: single bet handling
                 if (!realBetService.hasOpenBetFor(snapshot.slug())) {
                     logSellSkip("NO_OPEN_BET", snapshot.slug(), "real mode");
                 } else {
@@ -114,11 +117,14 @@ public class TradingDecisionService {
                             bet -> log.info("DECISION action=SOLD (REAL) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
                                     bet.marketSlug(), bet.side(), bet.price(),
                                     bet.soldPrice(), bet.profitLoss()),
-                            () -> logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "real sell check returned empty (EV < threshold or executor error)")
+                            () -> logSellSkip("EV_BELOW_THRESHOLD", snapshot.slug(), "real sell check returned empty")
                     );
                 }
             }
 
+            // ------------------------------------------------------------
+            // COMMON ENTRY PRE‑CHECKS (time, price, market data)
+            // ------------------------------------------------------------
             if (snapshot.secondsSinceOpen() < tradingProperties.minimumSecondsSinceOpen()) {
                 logSkip("TOO_SOON_AFTER_OPEN", snapshot.slug(),
                         "secondsSinceOpen=" + snapshot.secondsSinceOpen()
@@ -138,11 +144,11 @@ public class TradingDecisionService {
                 return;
             }
 
-            boolean alreadyOpen = tradingProperties.mock()
-                    ? mockBetService.hasOpenBetFor(snapshot.slug())
-                    : realBetService.hasOpenBetFor(snapshot.slug());
-            if (alreadyOpen) {
-                logSkip("BET_ALREADY_OPEN", snapshot.slug(), "one bet per window already placed");
+            // For real mode, we block if there's already an open real bet.
+            // For mock mode, we allow multiple strategies to bet on the same slug,
+            // so we skip this check only for mock.
+            if (!tradingProperties.mock() && realBetService.hasOpenBetFor(snapshot.slug())) {
+                logSkip("BET_ALREADY_OPEN", snapshot.slug(), "one real bet per window already placed");
                 return;
             }
 
@@ -203,17 +209,36 @@ public class TradingDecisionService {
 
             double marketPriceForSide = estimate.recommendedSide() == MarketSide.UP ? upMarketPrice : downMarketPrice;
 
+            // ------------------------------------------------------------
+            // ENTRY LOGIC – multi‑strategy for mock, single for real
+            // ------------------------------------------------------------
             if (tradingProperties.mock()) {
-                mockBetService.placeMockBet(
-                        snapshot.slug(), estimate.recommendedSide(), currentPrice, snapshot.strikePriceUsd(),
-                        marketPriceForSide, estimate.recommendedEv(), estimate.recommendedChance(),
-                        snapshot.secondsUntilClose());
+                List<MockBet> placed = mockBetService.placeBetsForAllStrategies(
+                        snapshot,
+                        estimate.recommendedSide(),
+                        estimate.recommendedEv(),
+                        estimate.recommendedChance(),
+                        BigDecimal.valueOf(marketPriceForSide),
+                        currentPrice,
+                        snapshot.strikePriceUsd(),
+                        snapshot.secondsUntilClose()
+                );
 
-                log.info("DECISION action=BET_PLACED (MOCK) slug={} side={} amount={} winChance={} ev={} effectiveThreshold={}",
-                        snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
-                        round(estimate.recommendedChance()), round(estimate.recommendedEv()),
-                        round(effectiveEvThreshold));
+                if (!placed.isEmpty()) {
+                    for (MockBet bet : placed) {
+                        log.info("DECISION action=BET_PLACED (MOCK) strategy={} slug={} side={} amount={} winChance={} ev={} effectiveThreshold={}",
+                                bet.strategyId(), snapshot.slug(), estimate.recommendedSide(),
+                                tradingProperties.betAmount(),
+                                round(estimate.recommendedChance()), round(estimate.recommendedEv()),
+                                round(effectiveEvThreshold));
+                    }
+                } else {
+                    log.info("DECISION skip reason=NO_STRATEGY_QUALIFIED slug={} side={} ev={} winChance={}",
+                            snapshot.slug(), estimate.recommendedSide(),
+                            round(estimate.recommendedEv()), round(estimate.recommendedChance()));
+                }
             } else {
+                // Real mode: single bet
                 try {
                     realBetService.placeRealBet(
                             snapshot, estimate.recommendedSide(), estimate.recommendedEv(), estimate.recommendedChance());
@@ -228,12 +253,6 @@ public class TradingDecisionService {
                 }
             }
 
-            log.info("DECISION action=BET_PLACED slug={} side={} amount={} priceBetAt={} priceToAchieve={} " +
-                            "marketPriceForSide={} winChance={} ev={} effectiveThreshold={}",
-                    snapshot.slug(), estimate.recommendedSide(), tradingProperties.betAmount(),
-                    currentPrice, snapshot.strikePriceUsd(), marketPriceForSide,
-                    round(estimate.recommendedChance()), round(estimate.recommendedEv()),
-                    round(effectiveEvThreshold));
         } catch (Exception e) {
             log.error("Error during trading decision evaluation", e);
         }

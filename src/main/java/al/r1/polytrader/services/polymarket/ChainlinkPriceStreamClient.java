@@ -30,26 +30,13 @@ import java.util.concurrent.atomic.AtomicReference;
 @Service
 public class ChainlinkPriceStreamClient {
 
-    private static final Duration PING_INTERVAL =
-            Duration.ofSeconds(5);
-
-    private static final Duration RECONNECT_DELAY =
-            Duration.ofSeconds(5);
-
-    private static final Duration STALE_THRESHOLD =
-            Duration.ofSeconds(20);
-
-    private static final Duration STALENESS_CHECK_INTERVAL =
-            Duration.ofSeconds(5);
-
-    private static final String RAW_TOPIC =
-            "crypto_prices_chainlink";
-
-    private static final String TWAP_SIXTY_TOPIC =
-            "crypto_prices_twap_sixty";
-
-    private static final BigInteger E18 =
-            BigInteger.TEN.pow(18);
+    private static final Duration PING_INTERVAL = Duration.ofSeconds(5);
+    private static final Duration RECONNECT_DELAY = Duration.ofSeconds(5);
+    private static final Duration STALE_THRESHOLD = Duration.ofSeconds(20);
+    private static final Duration STALENESS_CHECK_INTERVAL = Duration.ofSeconds(5);
+    private static final String RAW_TOPIC = "crypto_prices_chainlink";
+    private static final String TWAP_SIXTY_TOPIC = "crypto_prices_twap_sixty";
+    private static final BigInteger E18 = BigInteger.TEN.pow(18);
 
     private final PolymarketProperties properties;
     private final ObjectMapper objectMapper;
@@ -58,82 +45,49 @@ public class ChainlinkPriceStreamClient {
     private final ProbabilityTable probabilityTable;
     private final TradingDecisionService tradingDecisionService;
 
-    private final PolymarketRollingWindow btcRollingWindow =
-            new PolymarketRollingWindow();
-
-    private final AtomicReference<WebSocketSession> currentSession =
-            new AtomicReference<>();
+    private final PolymarketRollingWindow btcRollingWindow = new PolymarketRollingWindow();
+    private final AtomicReference<WebSocketSession> currentSession = new AtomicReference<>();
 
     private volatile WebSocketClient client;
-
     private volatile long lastMessageAtMillis = -1;
-
     private volatile boolean running = false;
 
-    public ChainlinkPriceStreamClient(
-            PolymarketProperties properties,
-            ObjectMapper objectMapper,
-            TaskScheduler taskScheduler,
-            Prices prices,
-            ProbabilityTable probabilityTable,
-            TradingDecisionService tradingDecisionService) {
-
+    public ChainlinkPriceStreamClient(PolymarketProperties properties, ObjectMapper objectMapper, TaskScheduler taskScheduler,
+                                      Prices prices, ProbabilityTable probabilityTable, TradingDecisionService tradingDecisionService) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.taskScheduler = taskScheduler;
         this.prices = prices;
         this.probabilityTable = probabilityTable;
-        this.tradingDecisionService =
-                tradingDecisionService;
+        this.tradingDecisionService = tradingDecisionService;
     }
 
     public synchronized void start() {
-
         if (running) {
             return;
         }
-
         running = true;
-
         connect();
-
         taskScheduler.scheduleAtFixedRate(
                 this::sendPing,
                 PING_INTERVAL
         );
-
         taskScheduler.scheduleAtFixedRate(
                 this::checkStaleness,
                 STALENESS_CHECK_INTERVAL
         );
 
-        log.info(
-                "Chainlink RTDS stream started: url={}",
-                properties.wssLiveDataUrl()
-        );
+        log.info("Chainlink RTDS stream started: url={}", properties.wssLiveDataUrl());
     }
 
     public synchronized void stop() {
-
         running = false;
-
-        WebSocketSession session =
-                currentSession.getAndSet(null);
-
-        if (session != null
-                && session.isOpen()) {
-
+        WebSocketSession session = currentSession.getAndSet(null);
+        if (session != null && session.isOpen()) {
             try {
-                session.close(
-                        CloseStatus.NORMAL
-                );
-
+                session.close(CloseStatus.NORMAL);
             } catch (Exception e) {
-
-                log.debug(
-                        "Failed to close Chainlink RTDS session",
-                        e
-                );
+                log.debug("Failed to close Chainlink RTDS session", e);
             }
         }
 
@@ -143,109 +97,46 @@ public class ChainlinkPriceStreamClient {
     }
 
     private void connect() {
-
         if (!running) {
             return;
         }
-
-        client =
-                new StandardWebSocketClient();
-
-        String url =
-                properties.wssLiveDataUrl();
-
+        client = new StandardWebSocketClient();
+        String url = properties.wssLiveDataUrl();
         client.execute(
                 new TextWebSocketHandler() {
-
                     @Override
-                    public void afterConnectionEstablished(
-                            WebSocketSession session) {
-
-                        currentSession.set(
-                                session
-                        );
-
-                        lastMessageAtMillis =
-                                System.currentTimeMillis();
-
-                        log.info(
-                                "Connected to Polymarket RTDS: session={}",
-                                session.getId()
-                        );
-
-                        sendSubscription(
-                                session
-                        );
+                    public void afterConnectionEstablished(WebSocketSession session) {
+                        currentSession.set(session);
+                        lastMessageAtMillis = System.currentTimeMillis();
+                        log.info("Connected to Polymarket RTDS: session={}", session.getId());
+                        sendSubscription(session);
                     }
 
                     @Override
-                    protected void handleTextMessage(
-                            WebSocketSession session,
-                            TextMessage message) {
-
-                        String payload =
-                                message.getPayload();
-
-                        if ("PONG".equals(payload)
-                                || "PING".equals(payload)) {
-
+                    protected void handleTextMessage(WebSocketSession session, TextMessage message) {
+                        String payload = message.getPayload();
+                        if ("PONG".equals(payload) || "PING".equals(payload)) {
                             return;
                         }
-
-                        lastMessageAtMillis =
-                                System.currentTimeMillis();
-
+                        lastMessageAtMillis = System.currentTimeMillis();
                         try {
-
-                            onMessage(
-                                    objectMapper.readTree(
-                                            payload
-                                    )
-                            );
-
+                            onMessage(objectMapper.readTree(payload));
                         } catch (Exception e) {
-
-                            log.warn(
-                                    "Failed to parse Polymarket RTDS message: {}",
-                                    payload,
-                                    e
-                            );
+                            log.warn("Failed to parse Polymarket RTDS message: {}", payload, e);
                         }
                     }
 
                     @Override
-                    public void handleTransportError(
-                            WebSocketSession session,
-                            Throwable exception) {
-
-                        currentSession.compareAndSet(
-                                session,
-                                null
-                        );
-
-                        log.warn(
-                                "Polymarket RTDS transport error",
-                                exception
-                        );
-
+                    public void handleTransportError(WebSocketSession session, Throwable exception) {
+                        currentSession.compareAndSet(session, null);
+                        log.warn("Polymarket RTDS transport error", exception);
                         scheduleReconnect();
                     }
 
                     @Override
-                    public void afterConnectionClosed(
-                            WebSocketSession session,
-                            CloseStatus status) {
-
-                        currentSession.compareAndSet(
-                                session,
-                                null
-                        );
-
-                        log.warn(
-                                "Polymarket RTDS connection closed: status={}",
-                                status
-                        );
-
+                    public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+                        currentSession.compareAndSet(session, null);
+                        log.warn("Polymarket RTDS connection closed: status={}", status);
                         if (running) {
                             scheduleReconnect();
                         }
@@ -324,140 +215,65 @@ public class ChainlinkPriceStreamClient {
         }
     }
 
-    private void onMessage(
-            JsonNode node) {
-
-        String topic =
-                node.path("topic")
-                        .asText("");
-
+    private void onMessage(JsonNode node) {
+        String topic = node.path("topic").asText("");
         if (topic.isBlank()) {
             return;
         }
-
-        JsonNode payload =
-                node.get("payload");
+        JsonNode payload = node.get("payload");
 
         if (payload == null) {
             return;
         }
 
-        ChainlinkSymbol symbol =
-                ChainlinkSymbol.fromWire(
-                        payload.path("symbol")
-                                .asText(null)
-                );
+        ChainlinkSymbol symbol = ChainlinkSymbol.fromWire(payload.path("symbol").asText(null));
 
         if (symbol == null) {
             return;
         }
 
         switch (topic) {
-
-            case RAW_TOPIC ->
-                    handleRawPrice(
-                            symbol,
-                            payload
-                    );
-
-            case TWAP_SIXTY_TOPIC ->
-                    handleTwapSixty(
-                            symbol,
-                            payload
-                    );
-
-            default ->
-                    log.debug(
-                            "Ignoring unknown Polymarket RTDS topic: {}",
-                            topic
-                    );
+            case RAW_TOPIC -> handleRawPrice(symbol, payload);
+            case TWAP_SIXTY_TOPIC -> handleTwapSixty(symbol, payload);
+            default -> log.debug("Ignoring unknown Polymarket RTDS topic: {}", topic);
         }
     }
 
-    private void handleRawPrice(
-            ChainlinkSymbol symbol,
-            JsonNode payload) {
-
-        BigDecimal price =
-                parseDecimal(
-                        payload.get("value")
-                );
+    private void handleRawPrice(ChainlinkSymbol symbol, JsonNode payload) {
+        BigDecimal price = parseDecimal(payload.get("value"));
 
         if (price == null) {
             return;
         }
 
-        JsonNode timestampNode =
-                payload.get("timestamp");
+        JsonNode timestampNode = payload.get("timestamp");
 
-        if (timestampNode == null
-                || timestampNode.isNull()) {
-
-            log.warn(
-                    "Chainlink raw price missing payload.timestamp: symbol={} payload={}",
-                    symbol.getWire(),
-                    payload
-            );
-
+        if (timestampNode == null || timestampNode.isNull()) {
+            log.warn("Chainlink raw price missing payload.timestamp: symbol={} payload={}", symbol.getWire(), payload);
             return;
         }
 
-        long observedAtMillis =
-                timestampNode.longValue();
+        long observedAtMillis = timestampNode.longValue();
 
         if (observedAtMillis <= 0) {
-
-            log.warn(
-                    "Chainlink raw price has invalid payload.timestamp: symbol={} timestamp={} payload={}",
-                    symbol.getWire(),
-                    observedAtMillis,
-                    payload
+            log.warn("Chainlink raw price has invalid payload.timestamp: symbol={} timestamp={} payload={}", symbol.getWire(),
+                    observedAtMillis, payload
             );
-
             return;
         }
 
-        /*
-         * Accept Unix seconds as well as Unix milliseconds.
-         */
-        if (observedAtMillis
-                < 100_000_000_000L) {
-
+        if (observedAtMillis < 100_000_000_000L) {
             observedAtMillis *= 1000L;
         }
 
-        prices.updatePrice(
-                symbol,
-                price,
-                observedAtMillis
+        prices.updatePrice(symbol, price, observedAtMillis);
+
+        log.trace("Chainlink raw price: symbol={} price={} observedAt={} receivedAt={} ageMs={}",
+                symbol.getWire(), price, Instant.ofEpochMilli(observedAtMillis), Instant.now(), prices.getPriceAgeMillis(symbol)
         );
 
-        log.trace(
-                "Chainlink raw price: symbol={} price={} observedAt={} receivedAt={} ageMs={}",
-                symbol.getWire(),
-                price,
-                Instant.ofEpochMilli(
-                        observedAtMillis
-                ),
-                Instant.now(),
-                prices.getPriceAgeMillis(
-                        symbol
-                )
-        );
-
-        /*
-         * THIS IS THE IMPORTANT NEW PART.
-         *
-         * The BUY decision is triggered immediately by the
-         * Chainlink price update rather than waiting for the
-         * next 1-second scheduler tick.
-         *
-         * Only BTC is relevant to the current strategy.
-         */
         if (symbol == ChainlinkSymbol.BTC_USD) {
-
-            tradingDecisionService
-                    .onChainlinkPriceUpdate();
+            tradingDecisionService.onChainlinkPriceUpdate(ChainlinkSymbol.BTC_USD);
         }
     }
 

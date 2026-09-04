@@ -9,6 +9,6 @@ public record PolymarketMarketSnapshot(
         BigDecimal upBid,
         BigDecimal downBid,
         long secondsUntilClose,
-        BigDecimal strikePriceUsd,
+        BigDecimal resolutionPrice,
         long secondsSinceOpen
 ) {}

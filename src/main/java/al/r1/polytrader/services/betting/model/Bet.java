@@ -6,7 +6,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import java.math.BigDecimal;
 import java.time.Instant;
 
-public record RealBet(
+public record Bet(
         String id,
         @JsonProperty("order_id") String orderId,
         @JsonProperty("token_id") String tokenId,

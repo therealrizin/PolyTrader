@@ -29,24 +29,20 @@ public class ProbabilityTable {
     public synchronized double getChance(double seconds, double changePercent) {
         int time = (int) Math.round(seconds);
 
-        if (time < 1 || time > 300) {
+        if (time < 1 || time > 300 || Double.isNaN(changePercent) || Double.isInfinite(changePercent)) {
             return 0.0;
         }
 
-        if (Double.isNaN(changePercent) || Double.isInfinite(changePercent)) {
-            return 0.0;
+        if (changePercent < 0.001 && changePercent > -0.001) {
+            return 0.5;
         }
 
         int bucket = mapPercentToBucket(changePercent);
-
         double weightedCount = probabilitiesTable[time][bucket];
-
         if (numberOfChecksWithWeight <= 0.0) {
             return 0.0;
         }
-
         double probability = weightedCount / numberOfChecksWithWeight;
-
         return Math.clamp(probability, 0.0, 1.0);
     }
 
@@ -59,9 +55,7 @@ public class ProbabilityTable {
             return;
         }
 
-        if (Double.isNaN(changePure)
-                || Double.isInfinite(changePure)
-                || changePure <= 0.0) {
+        if (Double.isNaN(changePure) || Double.isInfinite(changePure) || changePure <= 0.0) {
             return;
         }
 
@@ -116,17 +110,13 @@ public class ProbabilityTable {
 
     private int mapPercentToBucket(double changePercent) {
         int bucket = (int) Math.round(changePercent * 1000.0);
-
         bucket += CENTER;
-
-        return Math.clamp(bucket,
-                0, BUCKET_COUNT - 1);
+        return Math.clamp(bucket, 0, BUCKET_COUNT - 1);
     }
 
     public synchronized void reset() {
         this.probabilitiesTable =
                 new double[SECONDS_DIM][BUCKET_COUNT];
-
         this.numberOfChecks = 0;
         this.numberOfChecksWithWeight = 0.0;
         this.weight = 1.0;

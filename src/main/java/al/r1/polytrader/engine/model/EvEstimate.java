@@ -2,10 +2,9 @@ package al.r1.polytrader.engine.model;
 
 public record EvEstimate(
         double upChance,
+        double upPriceToMeetEv,
+        double upEvRequired,
         double downChance,
-        double upEv,
-        double downEv,
-        MarketSide recommendedSide,
-        double recommendedChance,
-        double recommendedEv
+        double downPriceToMeetEv,
+        double downEvRequired
 ) {}

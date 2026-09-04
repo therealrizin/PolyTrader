@@ -23,13 +23,4 @@ public enum ChainlinkSymbol {
         }
         return null;
     }
-
-    public static ChainlinkSymbol fromLoose(String value) {
-        if (value == null || value.isBlank()) return null;
-        String normalized = value.trim().toLowerCase();
-        if (!normalized.contains("/")) {
-            normalized = normalized + "/usd";
-        }
-        return fromWire(normalized);
-    }
 }

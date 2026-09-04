@@ -1,5 +1,6 @@
 package al.r1.polytrader.engine;
 
+import al.r1.polytrader.config.model.TradingProperties;
 import al.r1.polytrader.engine.model.EvEstimate;
 import al.r1.polytrader.engine.model.MarketSide;
 import org.springframework.stereotype.Component;
@@ -11,382 +12,170 @@ import java.math.RoundingMode;
 public class TradingEngine {
 
     private static final int MAX_MARKET_SECONDS = 300;
-
     private static final int TWAP_WINDOW_SECONDS = 60;
 
-    /*
-     * Below this percentage difference we consider the required
-     * movement effectively zero.
-     */
-    private static final double ZERO_MOVEMENT_THRESHOLD_PERCENT =
-            0.0005;
-
     private final ProbabilityTable table;
+    private final TradingProperties tradingProperties;
 
-    public TradingEngine(
-            ProbabilityTable table) {
-
+    public TradingEngine(ProbabilityTable table, TradingProperties tradingProperties) {
         this.table = table;
+        this.tradingProperties = tradingProperties;
     }
 
-    public EvEstimate estimateUpDown(
-            BigDecimal currentLivePrice,
-            BigDecimal currentTwapPrice,
-            BigDecimal referencePrice,
-            int secondsLeft,
-            double upMarketPrice,
-            double downMarketPrice,
-            double takerFee) {
-
-        int safeSecondsLeft =
-                Math.clamp(
-                        secondsLeft,
-                        0,
-                        MAX_MARKET_SECONDS
-                );
-
-        double upChance =
-                estimatedUpChance(
-                        currentLivePrice,
-                        currentTwapPrice,
-                        referencePrice,
-                        safeSecondsLeft
-                );
-
-        double downChance =
-                1.0 - upChance;
-
-        double upEv =
-                evForBuySide(
-                        upChance,
-                        upMarketPrice,
-                        takerFee
-                );
-
-        double downEv =
-                evForBuySide(
-                        downChance,
-                        downMarketPrice,
-                        takerFee
-                );
-
-        MarketSide recommendedSide =
-                upEv >= downEv
-                        ? MarketSide.UP
-                        : MarketSide.DOWN;
-
-        double recommendedChance =
-                recommendedSide == MarketSide.UP
-                        ? upChance
-                        : downChance;
-
-        double recommendedEv =
-                Math.max(
-                        upEv,
-                        downEv
-                );
-
-        return new EvEstimate(
-                upChance,
-                downChance,
-                upEv,
-                downEv,
-                recommendedSide,
-                recommendedChance,
-                recommendedEv
-        );
+    public EvEstimate estimatePricesToMeetEv(BigDecimal currentLivePrice, BigDecimal currentTwapPrice, BigDecimal resolutionPrice, int secondsLeft) {
+        int safeSecondsLeft = Math.clamp(secondsLeft, 0, MAX_MARKET_SECONDS);
+        double upChance = estimatedUpChance(currentLivePrice, currentTwapPrice, resolutionPrice, safeSecondsLeft);
+        double downChance = 1.0 - upChance;
+        double upEvRequired = requiredEv(upChance);
+        double downEvRequired = requiredEv(downChance);
+        double upPriceToMeetEv = maxBuyPriceForEv(upChance, upEvRequired);
+        double downPriceToMeetEv = maxBuyPriceForEv(downChance, downEvRequired);
+        return new EvEstimate(upChance, upPriceToMeetEv, upEvRequired, downChance, downPriceToMeetEv, downEvRequired);
     }
 
-    /**
-     * Returns the maximum BUY price for which:
-     *
-     * EV >= targetEv
-     *
-     * Existing payout model:
-     *
-     * grossPayout = 1 / price
-     *
-     * netPayout =
-     *     1 + (grossPayout - 1) * (1 - fee)
-     *
-     * EV =
-     *     winChance * netPayout - 1
-     */
-    public double maxBuyPriceForEv(
-            double winChance,
-            double targetEv,
-            double takerFee) {
-
-        if (!Double.isFinite(winChance)
-                || winChance <= 0.0
-                || winChance > 1.0) {
-
+    public double maxBuyPriceForEv(double winChance, double targetEv) {
+        if (!Double.isFinite(winChance) || !Double.isFinite(targetEv) || winChance <= 0.0 || winChance > 1.0) {
             return 0.0;
         }
-
-        if (!Double.isFinite(targetEv)) {
-            return 0.0;
-        }
-
-        if (!Double.isFinite(takerFee)
-                || takerFee < 0.0
-                || takerFee >= 1.0) {
-
-            return 0.0;
-        }
-
-        double denominator =
-                ((1.0 + targetEv) / winChance)
-                        - takerFee;
-
-        if (!Double.isFinite(denominator)
-                || denominator <= 0.0) {
-
-            return 0.0;
-        }
-
-        double maxPrice =
-                (1.0 - takerFee)
-                        / denominator;
-
+        double maxPrice = calculateMaxBuyPrice(winChance, targetEv);
         if (!Double.isFinite(maxPrice)) {
             return 0.0;
         }
-
-        return Math.clamp(
-                maxPrice,
-                0.0,
-                1.0
-        );
+        return Math.clamp(maxPrice, 0.0, 1.0);
     }
 
-    public double evForBuySide(
-            double winChance,
-            double marketPrice,
-            double takerFee) {
-
-        if (!Double.isFinite(winChance)
-                || !Double.isFinite(marketPrice)
-                || !Double.isFinite(takerFee)) {
-
-            return Double.NEGATIVE_INFINITY;
+    public double minSellPriceForEv(double winChance, double targetEv) {
+        if (!Double.isFinite(winChance) || !Double.isFinite(targetEv) || winChance <= 0.0 || winChance > 1.0) {
+            return 1.0;
         }
-
-        if (marketPrice <= 0.0
-                || marketPrice >= 1.0) {
-
-            return Double.NEGATIVE_INFINITY;
+        double minPrice = calculateMinSellPrice(winChance, targetEv);
+        if (!Double.isFinite(minPrice)) {
+            return 1.0;
         }
-
-        if (takerFee < 0.0
-                || takerFee >= 1.0) {
-
-            return Double.NEGATIVE_INFINITY;
-        }
-
-        double grossPayout =
-                1.0 / marketPrice;
-
-        double netPayout =
-                1.0
-                        + (grossPayout - 1.0)
-                        * (1.0 - takerFee);
-
-        return winChance * netPayout - 1.0;
+        return Math.clamp(minPrice, 0.0, 1.0);
     }
 
-    private double estimatedUpChance(
-            BigDecimal currentLivePrice,
-            BigDecimal currentTwapPrice,
-            BigDecimal referencePrice,
-            int secondsLeft) {
+    public double netSellValuePerShare(double sellPrice) {
+        if (!Double.isFinite(sellPrice) || sellPrice <= 0.0 || sellPrice > 1.0) {
+            return 0.0;
+        }
+        double netValue = sellPrice - takerFeeEstimate(sellPrice);
+        if (!Double.isFinite(netValue)) {
+            return 0.0;
+        }
+        return Math.clamp(netValue, 0.0, 1.0);
+    }
 
+    public double requiredEv(double winChance) {
+        double minEv = tradingProperties.minimumExpectedEv();
+        double minWinChance = tradingProperties.minimumWinChance();
+
+        if (winChance <= minWinChance) {
+            return minEv;
+        }
+        if (winChance >= 0.90) {
+            return minEv / 5.0;
+        }
+        double progress = (winChance - minWinChance) / (0.90 - minWinChance);
+        return minEv * (1.0 - progress * 0.8);
+    }
+
+    private double calculateMaxBuyPrice(double winChance, double targetEv) {
+        double price = winChance;
+        for (int i = 0; i < 20; i++) {
+            double takerFee = takerFeeEstimate(price);
+            double denominator = ((1.0 + targetEv) / winChance) - takerFee;
+            if (!Double.isFinite(denominator) || denominator <= 0.0) {
+                return 0.0;
+            }
+            double newPrice = (1.0 - takerFee) / denominator;
+            if (!Double.isFinite(newPrice)) {
+                return 0.0;
+            }
+            newPrice = Math.clamp(newPrice, 0.0, 1.0);
+            if (Math.abs(newPrice - price) < 1e-10) {
+                return newPrice;
+            }
+            price = newPrice;
+        }
+        return price;
+    }
+
+    private double calculateMinSellPrice(double winChance, double targetEv) {
+        double target = winChance * (1.0 - targetEv);
+        double price = target;
+        for (int i = 0; i < 20; i++) {
+            double takerFee = takerFeeEstimate(price);
+            double newPrice = target + takerFee;
+            if (!Double.isFinite(newPrice)) {
+                return 1.0;
+            }
+            newPrice = Math.clamp(newPrice, 0.0, 1.0);
+            if (Math.abs(newPrice - price) < 1e-10) {
+                return newPrice;
+            }
+            price = newPrice;
+        }
+        return price;
+    }
+
+    private double takerFeeEstimate(double price) {
+        double feeCoefficient = tradingProperties.takerFee();
+        if (!Double.isFinite(feeCoefficient) || feeCoefficient < 0.0 || feeCoefficient >= 1.0) {
+            return 0.0;
+        }
+        price = Math.clamp(price, 0.0, 1.0);
+        return feeCoefficient * price * (1.0 - price);
+    }
+
+    private double estimatedUpChance(BigDecimal currentLivePrice, BigDecimal currentTwapPrice, BigDecimal referencePrice, int secondsLeft) {
         if (currentLivePrice == null
                 || currentTwapPrice == null
                 || referencePrice == null
                 || currentLivePrice.signum() <= 0
                 || currentTwapPrice.signum() <= 0
                 || referencePrice.signum() <= 0) {
-
-            return 0.5;
+            return -1;
         }
 
-        secondsLeft =
-                Math.clamp(
-                        secondsLeft,
-                        0,
-                        MAX_MARKET_SECONDS
-                );
+        secondsLeft = Math.clamp(secondsLeft, 0, MAX_MARKET_SECONDS);
 
-        /*
-         * Once >=60 seconds remain, use the normal direct
-         * movement probability.
-         */
         if (secondsLeft >= TWAP_WINDOW_SECONDS) {
-
-            double requiredPctChange =
-                    percentageChange(
-                            currentLivePrice,
-                            referencePrice
-                    );
-
-            return probabilityOfReaching(
-                    requiredPctChange,
-                    secondsLeft
-            );
+            double requiredPctChange = percentageChange(currentLivePrice, referencePrice);
+            return probabilityForChange(requiredPctChange, secondsLeft);
         }
 
-        /*
-         * For the final 60 seconds, account for the current
-         * 60-second TWAP already contributing to the final
-         * reference comparison.
-         */
-        double futureWeight =
-                (double) secondsLeft
-                        / TWAP_WINDOW_SECONDS;
+        double futureWeight = (double) secondsLeft / TWAP_WINDOW_SECONDS;
 
         if (futureWeight <= 0.0) {
-
-            return currentTwapPrice.compareTo(
-                    referencePrice
-            ) > 0
-                    ? 1.0
-                    : 0.0;
+            return currentTwapPrice.compareTo(referencePrice) > 0 ? 1.0 : 0.0;
         }
 
-        double currentTwap =
-                currentTwapPrice.doubleValue();
+        double currentTwap = currentTwapPrice.doubleValue();
+        double reference = referencePrice.doubleValue();
+        double requiredFutureLivePrice = (reference - currentTwap * (1.0 - futureWeight)) / futureWeight;
+        double currentLive = currentLivePrice.doubleValue();
+        double requiredPctChange = (requiredFutureLivePrice - currentLive) / currentLive * 100.0;
 
-        double reference =
-                referencePrice.doubleValue();
-
-        double requiredFutureLivePrice =
-                (
-                        reference
-                                - currentTwap
-                                * (1.0 - futureWeight)
-                )
-                        / futureWeight;
-
-        double currentLive =
-                currentLivePrice.doubleValue();
-
-        double requiredPctChange =
-                (
-                        requiredFutureLivePrice
-                                - currentLive
-                )
-                        / currentLive
-                        * 100.0;
-
-        return probabilityOfReaching(
-                requiredPctChange,
-                secondsLeft
-        );
+        return probabilityForChange(requiredPctChange, secondsLeft);
     }
 
-    private double probabilityOfReaching(
-            double requiredPctChange,
-            int secondsLeft) {
-
-        secondsLeft =
-                Math.clamp(
-                        secondsLeft,
-                        0,
-                        MAX_MARKET_SECONDS
-                );
-
-        if (!Double.isFinite(requiredPctChange)) {
-            return 0.5;
-        }
-
-        if (Math.abs(requiredPctChange)
-                < ZERO_MOVEMENT_THRESHOLD_PERCENT) {
-
-            return 0.5;
-        }
-
+    private double probabilityForChange(double requiredPctChange, int secondsLeft) {
         if (requiredPctChange < 0.0) {
-
-            double probabilityDown =
-                    table.getChance(
-                            secondsLeft,
-                            Math.abs(requiredPctChange)
-                    );
-
-            return clampProbability(
-                    1.0 - probabilityDown
-            );
+            double probability = table.getChance(secondsLeft, Math.abs(requiredPctChange));
+            return clampProbability(1.0 - probability);
         }
-
-        double probabilityUp =
-                table.getChance(
-                        secondsLeft,
-                        requiredPctChange
-                );
-
-        return clampProbability(
-                probabilityUp
-        );
+        double probability = table.getChance(secondsLeft, requiredPctChange);
+        return clampProbability(probability);
     }
 
-    private double percentageChange(
-            BigDecimal from,
-            BigDecimal to) {
-
-        return to.subtract(from)
-                .divide(
-                        from,
-                        8,
-                        RoundingMode.HALF_UP
-                )
-                .multiply(
-                        BigDecimal.valueOf(100)
-                )
+    private double percentageChange(BigDecimal from, BigDecimal to) {
+        return to.subtract(from).divide(from, 8, RoundingMode.HALF_UP)
+                .multiply(BigDecimal.valueOf(100))
                 .doubleValue();
     }
 
-    public double holdValuePerShare(
-            double winChance) {
-
-        return clampProbability(
-                winChance
-        );
-    }
-
-    public double netSellValuePerShare(
-            double currentBid,
-            double takerFee) {
-
-        if (!Double.isFinite(currentBid)
-                || !Double.isFinite(takerFee)
-                || currentBid <= 0.0
-                || currentBid >= 1.0
-                || takerFee < 0.0
-                || takerFee >= 1.0) {
-
-            return 0.0;
-        }
-
-        double fee =
-                takerFee
-                        * currentBid
-                        * (1.0 - currentBid);
-
-        return currentBid - fee;
-    }
-
-    private double clampProbability(
-            double probability) {
-
-        if (!Double.isFinite(probability)) {
-            return 0.5;
-        }
-
-        return Math.clamp(
-                probability,
-                0.0,
-                1.0
-        );
+    private double clampProbability(double probability) {
+        return Math.clamp(probability, 0.0, 1.0);
     }
 }

@@ -204,7 +204,7 @@ public class PolymarketTwapClient {
             return;
         }
 
-        double requiredPctChange = snapshot.strikePriceUsd().subtract(avg60s)
+        double requiredPctChange = snapshot.resolutionPrice().subtract(avg60s)
                 .divide(avg60s, 8, RoundingMode.HALF_UP).doubleValue();
     }
 

@@ -26,39 +26,18 @@ public class LiveMarketDataService {
     private final TradingDecisionService tradingDecisionService;
     private final BackfillService backfillService;
 
-    private final AtomicReference<ScheduledFuture<?>>
-            scheduledTask =
-            new AtomicReference<>();
-
-    private final AtomicReference<ScheduledFuture<?>>
-            tradingStartTask =
-            new AtomicReference<>();
-
-    private final AtomicBoolean serviceStarted =
-            new AtomicBoolean(false);
-
-    private final AtomicBoolean tradingStarted =
-            new AtomicBoolean(false);
+    private final AtomicReference<ScheduledFuture<?>> scheduledTask = new AtomicReference<>();
+    private final AtomicReference<ScheduledFuture<?>> tradingStartTask = new AtomicReference<>();
+    private final AtomicBoolean serviceStarted = new AtomicBoolean(false);
+    private final AtomicBoolean tradingStarted = new AtomicBoolean(false);
 
     public void start() {
-
-        if (!serviceStarted.compareAndSet(
-                false,
-                true
-        )) {
-
-            log.info(
-                    "LiveMarketDataService already started"
-            );
-
+        if (!serviceStarted.compareAndSet(false, true)) {
+            log.info("LiveMarketDataService already started");
             return;
         }
 
         try {
-
-            /*
-             * Start live price recording immediately.
-             */
             scheduledTask.set(
                     liveDataTaskScheduler.scheduleAtFixedRate(
                             this::tick,
@@ -67,15 +46,8 @@ public class LiveMarketDataService {
                     )
             );
 
-            /*
-             * Start Polymarket market data immediately.
-             */
             polymarketService.start();
 
-            /*
-             * Trading remains disabled until the historical
-             * probability table is completely built.
-             */
             tradingStartTask.set(
                     liveDataTaskScheduler.scheduleAtFixedRate(
                             this::startTradingWhenBackfillReady,
@@ -84,201 +56,87 @@ public class LiveMarketDataService {
                     )
             );
 
-            log.info(
-                    "LiveMarketDataService started. "
-                            + "Trading remains disabled until "
-                            + "BackfillService completes successfully."
-            );
-
+            log.info("LiveMarketDataService started. Trading remains disabled until BackfillService completes successfully.");
         } catch (Exception e) {
-
             serviceStarted.set(false);
-
             stopInternal();
-
             throw e;
         }
     }
 
     public void stop() {
-
-        if (!serviceStarted.compareAndSet(
-                true,
-                false
-        )) {
-
+        if (!serviceStarted.compareAndSet(true, false)) {
             return;
         }
-
         stopInternal();
     }
 
     private void stopInternal() {
-
-        ScheduledFuture<?> liveTask =
-                scheduledTask.getAndSet(null);
-
+        ScheduledFuture<?> liveTask = scheduledTask.getAndSet(null);
         if (liveTask != null) {
-
             liveTask.cancel(false);
-
-            log.info(
-                    "Live market data collection stopped"
-            );
+            log.info("Live market data collection stopped");
         }
 
-        ScheduledFuture<?> startTask =
-                tradingStartTask.getAndSet(null);
-
+        ScheduledFuture<?> startTask = tradingStartTask.getAndSet(null);
         if (startTask != null) {
-
             startTask.cancel(false);
-
-            log.info(
-                    "Trading readiness polling stopped"
-            );
+            log.info("Trading readiness polling stopped");
         }
 
-        if (tradingStarted.compareAndSet(
-                true,
-                false
-        )) {
-
+        if (tradingStarted.compareAndSet(true, false)) {
             try {
-
                 tradingDecisionService.stop();
-
             } catch (Exception e) {
-
-                log.error(
-                        "Failed stopping TradingDecisionService",
-                        e
-                );
+                log.error("Failed stopping TradingDecisionService", e);
             }
         }
 
         try {
-
             polymarketService.stop();
-
         } catch (Exception e) {
-
-            log.error(
-                    "Failed stopping PolymarketService",
-                    e
-            );
+            log.error("Failed stopping PolymarketService", e);
         }
     }
 
     private void startTradingWhenBackfillReady() {
+        if (!serviceStarted.get() || tradingStarted.get()) return;
 
-        if (!serviceStarted.get()) {
-            return;
-        }
-
-        if (tradingStarted.get()) {
-            return;
-        }
-
-        /*
-         * FAILURE IS TERMINAL FOR THIS APPLICATION RUN.
-         *
-         * Never start trading with an incomplete probability table.
-         */
         if (backfillService.hasFailed()) {
-
-            log.error(
-                    "BackfillService FAILED. "
-                            + "Trading will remain DISABLED."
-            );
-
-            ScheduledFuture<?> task =
-                    tradingStartTask.getAndSet(null);
-
-            if (task != null) {
-                task.cancel(false);
-            }
-
+            log.error("BackfillService FAILED. Trading will remain DISABLED.");
+            ScheduledFuture<?> task = tradingStartTask.getAndSet(null);
+            if (task != null) task.cancel(false);
             return;
         }
 
-        if (!backfillService.isCompleted()) {
-            return;
-        }
+        if (!backfillService.isCompleted()) return;
 
-        if (!tradingStarted.compareAndSet(
-                false,
-                true
-        )) {
+        if (!tradingStarted.compareAndSet(false, true)) return;
 
-            return;
-        }
+        ScheduledFuture<?> task = tradingStartTask.getAndSet(null);
+        if (task != null) task.cancel(false);
 
-        ScheduledFuture<?> task =
-                tradingStartTask.getAndSet(null);
-
-        if (task != null) {
-            task.cancel(false);
-        }
-
-        log.info(
-                "BackfillService completed successfully. "
-                        + "Starting TradingDecisionService."
-        );
-
+        log.info("BackfillService completed successfully. Starting TradingDecisionService.");
         try {
-
             tradingDecisionService.start();
-
-            log.info(
-                    "TradingDecisionService started successfully."
-            );
-
+            log.info("TradingDecisionService started successfully.");
         } catch (Exception e) {
-
             tradingStarted.set(false);
-
-            log.error(
-                    "TradingDecisionService failed to start. "
-                            + "Trading remains disabled.",
-                    e
-            );
-
-            /*
-             * Do not continuously retry a potentially broken
-             * trading engine.
-             */
-            ScheduledFuture<?> retryTask =
-                    tradingStartTask.getAndSet(null);
-
-            if (retryTask != null) {
-                retryTask.cancel(false);
-            }
+            log.error("TradingDecisionService failed to start. Trading remains disabled.", e);
+            // Do not continuously retry a potentially broken trading engine.
+            ScheduledFuture<?> retryTask = tradingStartTask.getAndSet(null);
+            if (retryTask != null) retryTask.cancel(false);
         }
     }
 
     private void tick() {
-
         try {
-
-            LocalDateTime now =
-                    LocalDateTime.now();
-
-            for (ChainlinkSymbol symbol :
-                    ChainlinkSymbol.values()) {
-
-                prices.recordSnapshot(
-                        symbol,
-                        now
-                );
+            LocalDateTime now = LocalDateTime.now();
+            for (ChainlinkSymbol symbol : ChainlinkSymbol.values()) {
+                prices.recordSnapshot(symbol, now);
             }
-
         } catch (Exception e) {
-
-            log.error(
-                    "Error during live data tick",
-                    e
-            );
+            log.error("Error during live data tick", e);
         }
     }
 }

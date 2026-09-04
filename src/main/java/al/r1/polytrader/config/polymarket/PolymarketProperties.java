@@ -4,6 +4,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "services.polymarket")
 public record PolymarketProperties(
+        String baseUrl,
         String wssLiveDataUrl,
         String gammaBaseUrl,
         String clobWssUrl,

@@ -1,6 +1,7 @@
 package al.r1.polytrader.services.polymarket;
 
 import al.r1.polytrader.config.polymarket.PolymarketProperties;
+import al.r1.polytrader.engine.model.MarketSide;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import al.r1.polytrader.services.polymarket.model.PolymarketMarketSnapshot;
@@ -14,471 +15,940 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.ObjectMapper;
 
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Provides the currently active Polymarket BTC 5-minute market.
- * <p>
- * Gamma is used only for:
- * - discovering the current market
- * - obtaining its end time
- * - obtaining the CLOB token IDs indirectly through the WebSocket client
- * <p>
- * Live UP/DOWN prices come exclusively from the Polymarket CLOB WebSocket.
- */
 @Slf4j
 @Component
 public class PolymarketDataProvider {
 
-    private static final Duration WINDOW = Duration.ofMinutes(5);
-    private static final String SLUG_PREFIX = "btc-updown-5m-";
-    private static final Duration SNAPSHOT_HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
-    private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
+    private static final Duration WINDOW =
+            Duration.ofMinutes(5);
+
+    private static final String SLUG_PREFIX =
+            "btc-updown-5m-";
+
+    private static final Duration SNAPSHOT_HEARTBEAT_INTERVAL =
+            Duration.ofSeconds(30);
+
+    private static final String CRYPTO_PRICE_PATH =
+            "/api/crypto/crypto-price";
+
+    private static final String CRYPTO_SYMBOL =
+            "BTC";
+
+    private static final String CRYPTO_VARIANT =
+            "fiveminute";
+
+    private static final boolean TWAP_ENABLED =
+            true;
+
+    private static final int TWAP_LOOKBACK_SECONDS =
+            60;
+
+    private static final ChainlinkSymbol SYMBOL =
+            ChainlinkSymbol.BTC_USD;
 
     private final WebClient gammaWebClient;
+    private final WebClient polymarketWebClient;
     private final PolymarketProperties properties;
     private final TaskScheduler liveDataTaskScheduler;
     private final Prices prices;
     private final PolymarketClock polymarketClock;
     private final PolymarketMarketWebSocketClient marketWebSocketClient;
 
-    /**
-     * Current market slug.
-     */
-    private final AtomicReference<String> currentSlug = new AtomicReference<>();
+    private final AtomicReference<String>
+            currentSlug =
+            new AtomicReference<>();
 
-    /**
-     * Reference price captured when the current 5m window starts.
-     */
-    private final AtomicReference<BigDecimal> referenceOpenPrice = new AtomicReference<>();
+    private final AtomicReference<Long>
+            currentEndEpochMillis =
+            new AtomicReference<>();
 
-    /**
-     * Current best bid / ask received from the CLOB WebSocket.
-     */
-    private final AtomicReference<BigDecimal> upBestBid = new AtomicReference<>();
-    private final AtomicReference<BigDecimal> upBestAsk = new AtomicReference<>();
-    private final AtomicReference<BigDecimal> downBestBid = new AtomicReference<>();
-    private final AtomicReference<BigDecimal> downBestAsk = new AtomicReference<>();
+    private final AtomicReference<Long>
+            currentWindowOpenEpochMillis =
+            new AtomicReference<>();
 
-    private final AtomicReference<PolymarketMarketSnapshot> latestSnapshot = new AtomicReference<>();
-    private final AtomicReference<String> lastLoggedSignature = new AtomicReference<>();
-    private final AtomicReference<Instant> lastSnapshotHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
+    private final AtomicReference<BigDecimal>
+            referenceOpenPrice =
+            new AtomicReference<>();
+
+    private final AtomicReference<BigDecimal>
+            upBestBid =
+            new AtomicReference<>();
+
+    private final AtomicReference<BigDecimal>
+            upBestAsk =
+            new AtomicReference<>();
+
+    private final AtomicReference<BigDecimal>
+            downBestBid =
+            new AtomicReference<>();
+
+    private final AtomicReference<BigDecimal>
+            downBestAsk =
+            new AtomicReference<>();
+
+    private final AtomicReference<PolymarketMarketSnapshot>
+            latestSnapshot =
+            new AtomicReference<>();
+
+    private final AtomicReference<String>
+            lastLoggedSignature =
+            new AtomicReference<>();
+
+    private final AtomicReference<Instant>
+            lastSnapshotHeartbeatAt =
+            new AtomicReference<>(
+                    Instant.EPOCH
+            );
 
     public PolymarketDataProvider(
-            @Qualifier("gammaWebClient") WebClient gammaWebClient,
+            @Qualifier("gammaWebClient")
+            WebClient gammaWebClient,
+
+            @Qualifier("polymarketWebClient")
+            WebClient polymarketWebClient,
+
             PolymarketProperties properties,
+
             TaskScheduler liveDataTaskScheduler,
+
             Prices prices,
+
             PolymarketClock polymarketClock,
+
             PolymarketMarketWebSocketClient marketWebSocketClient) {
 
-        this.gammaWebClient = gammaWebClient;
-        this.properties = properties;
-        this.liveDataTaskScheduler = liveDataTaskScheduler;
-        this.prices = prices;
-        this.polymarketClock = polymarketClock;
-        this.marketWebSocketClient = marketWebSocketClient;
+        this.gammaWebClient =
+                gammaWebClient;
+
+        this.polymarketWebClient =
+                polymarketWebClient;
+
+        this.properties =
+                properties;
+
+        this.liveDataTaskScheduler =
+                liveDataTaskScheduler;
+
+        this.prices =
+                prices;
+
+        this.polymarketClock =
+                polymarketClock;
+
+        this.marketWebSocketClient =
+                marketWebSocketClient;
     }
 
     @PostConstruct
     public void start() {
-        if (properties.gammaBaseUrl() == null || properties.gammaBaseUrl().isBlank()) {
+
+        if (properties.gammaBaseUrl() == null
+                || properties.gammaBaseUrl().isBlank()) {
+
             throw new IllegalStateException(
-                    "services.polymarket.gamma-base-url is not set. " +
-                            "Expected something like https://gamma-api.polymarket.com"
+                    "services.polymarket.gamma-base-url "
+                            + "is not configured"
             );
         }
 
         log.info(
-                "PolymarketDataProvider starting: gammaBaseUrl={} marketRefreshSeconds={}",
+                "PolymarketDataProvider starting: "
+                        + "gammaBaseUrl={} "
+                        + "marketRefreshSeconds={}",
                 properties.gammaBaseUrl(),
                 properties.marketRefreshSeconds()
         );
 
         refresh();
 
-        int refreshSeconds = properties.marketRefreshSeconds() > 0
-                ? properties.marketRefreshSeconds()
-                : 5;
+        int refreshSeconds =
+                properties.marketRefreshSeconds() > 0
+                        ? properties.marketRefreshSeconds()
+                        : 5;
 
         liveDataTaskScheduler.scheduleAtFixedRate(
                 this::refresh,
-                Duration.ofSeconds(refreshSeconds)
+                Duration.ofSeconds(
+                        refreshSeconds
+                )
         );
     }
 
-    public Optional<PolymarketMarketSnapshot> currentSnapshot() {
-        return Optional.ofNullable(latestSnapshot.get());
+    public Optional<PolymarketMarketSnapshot>
+    currentSnapshot() {
+
+        return Optional.ofNullable(
+                latestSnapshot.get()
+        );
     }
 
-    /**
-     * Called by PolymarketMarketWebSocketClient whenever the live CLOB best bid / ask changes.
-     */
     private void onPriceUpdate(
-            al.r1.polytrader.engine.model.MarketSide side,
+            String callbackSlug,
+            MarketSide side,
             BigDecimal bestBid,
             BigDecimal bestAsk) {
 
-        String slug = currentSlug.get();
-        if (slug == null) {
+        /*
+         * VERY IMPORTANT:
+         *
+         * The callback may belong to the previous market.
+         *
+         * Never allow an old WebSocket callback to modify
+         * the current market.
+         */
+        String slug =
+                currentSlug.get();
+
+        if (slug == null
+                || !slug.equals(callbackSlug)) {
+
             return;
         }
 
         switch (side) {
+
             case UP -> {
+
                 if (bestBid != null) {
                     upBestBid.set(bestBid);
                 }
+
                 if (bestAsk != null) {
                     upBestAsk.set(bestAsk);
                 }
             }
+
             case DOWN -> {
+
                 if (bestBid != null) {
                     downBestBid.set(bestBid);
                 }
+
                 if (bestAsk != null) {
                     downBestAsk.set(bestAsk);
                 }
             }
         }
 
-        rebuildSnapshot(slug);
+        rebuildSnapshot(
+                callbackSlug
+        );
     }
 
     private void refresh() {
+
         try {
-            String slug = computeCurrentSlug();
-            JsonNode event = fetchEventBySlug(slug);
+
+            String slug =
+                    computeCurrentSlug();
+
+            JsonNode event =
+                    fetchEventBySlug(slug);
 
             if (event == null) {
+
                 log.info(
-                        "REFRESH result=NO_EVENT slug={} detail='Gamma returned no event for this slug'",
+                        "REFRESH result=NO_EVENT slug={}",
                         slug
                 );
-                latestSnapshot.set(null);
+
+                /*
+                 * Only clear the snapshot if it belongs to
+                 * this market.
+                 */
+                if (slug.equals(
+                        currentSlug.get()
+                )) {
+
+                    latestSnapshot.set(null);
+                }
+
                 return;
             }
 
-            JsonNode marketsNode = event.get("markets");
-            if (marketsNode == null || !marketsNode.isArray() || marketsNode.isEmpty()) {
+            JsonNode marketsNode =
+                    event.get("markets");
+
+            if (marketsNode == null
+                    || !marketsNode.isArray()
+                    || marketsNode.isEmpty()) {
+
                 log.warn(
-                        "REFRESH result=NO_MARKETS slug={} detail='event found but markets[] missing/empty'",
+                        "REFRESH result=NO_MARKETS slug={}",
                         slug
                 );
+
                 latestSnapshot.set(null);
+
                 return;
             }
 
-            JsonNode market = marketsNode.get(0);
+            JsonNode market =
+                    marketsNode.get(0);
 
-            long nowMillis = polymarketClock.nowMillis();
-            long endEpochMillis = parseEndDate(market, nowMillis);
-            long windowOpenEpochMillis = endEpochMillis - WINDOW.toMillis();
-            long secondsUntilClose = Math.max(0, (endEpochMillis - nowMillis) / 1000);
-            long secondsSinceOpen = Math.max(0, (nowMillis - windowOpenEpochMillis) / 1000);
+            long nowMillis =
+                    polymarketClock.nowMillis();
 
-            handleWindowChange(slug);
-            captureReferencePriceIfNeeded(slug, secondsSinceOpen);
+            Long endEpochMillis =
+                    parseEndDate(market);
 
-            // The CLOB WebSocket is the ONLY source of live UP/DOWN prices now.
-            marketWebSocketClient.subscribe(slug, this::onPriceUpdate);
+            if (endEpochMillis == null) {
 
-            BigDecimal upAsk = upBestAsk.get();
-            BigDecimal downAsk = downBestAsk.get();
-            BigDecimal upBid = upBestBid.get();
-            BigDecimal downBid = downBestBid.get();
-
-            // We intentionally don't create a snapshot until both sides have received live CLOB data.
-            if (upAsk == null || downAsk == null) {
-                log.info(
-                        "REFRESH result=WAITING_FOR_CLOB_PRICES slug={} upBid={} upAsk={} downBid={} downAsk={}",
-                        slug,
-                        upBid,
-                        upAsk,
-                        downBid,
-                        downAsk
+                log.warn(
+                        "REFRESH result=NO_VALID_END_DATE slug={}",
+                        slug
                 );
+
                 latestSnapshot.set(null);
+
                 return;
             }
 
-            BigDecimal strikePriceUsd = referenceOpenPrice.get();
+            long windowOpenEpochMillis =
+                    endEpochMillis
+                            - WINDOW.toMillis();
+
+            long secondsUntilClose =
+                    secondsUntil(
+                            endEpochMillis,
+                            nowMillis
+                    );
+
+            long secondsSinceOpen =
+                    secondsSince(
+                            windowOpenEpochMillis,
+                            nowMillis
+                    );
+
+            handleWindowChange(
+                    slug,
+                    windowOpenEpochMillis,
+                    endEpochMillis
+            );
+
+            /*
+             * Official Price To Beat.
+             *
+             * NEVER calculate this locally.
+             */
+            BigDecimal strikePriceUsd =
+                    fetchPriceToBeat(
+                            windowOpenEpochMillis,
+                            endEpochMillis
+                    );
+
             if (strikePriceUsd == null) {
-                log.info(
-                        "REFRESH result=NO_REFERENCE_PRICE_YET slug={} price={} avg60sPrice={}",
+
+                log.warn(
+                        "REFRESH result=NO_OFFICIAL_PRICE_TO_BEAT "
+                                + "slug={} secondsSinceOpen={}",
                         slug,
-                        prices.getPrice(SYMBOL),
-                        prices.getAvg60sPrice(SYMBOL)
+                        secondsSinceOpen
                 );
+
+                referenceOpenPrice.set(null);
                 latestSnapshot.set(null);
+
                 return;
             }
 
             /*
-             * IMPORTANT:
-             * upAsk/downAsk are BEST ASKS, not 1-UP.
-             * The bot is a taker on entry, so these represent the approximate executable prices
-             * for BUYING UP/DOWN.
-             * upBid/downBid are the corresponding BEST BIDS, i.e. the approximate executable prices
-             * for SELLING an already-held UP/DOWN position back to the market.
+             * Make sure this response is still for the current
+             * market before storing it.
              */
-            latestSnapshot.set(
-                    new PolymarketMarketSnapshot(
-                            slug,
-                            upAsk,
-                            downAsk,
-                            upBid,
-                            downBid,
-                            secondsUntilClose,
-                            strikePriceUsd,
-                            secondsSinceOpen
-                    )
-            );
+            if (!slug.equals(
+                    currentSlug.get()
+            )) {
 
-            logSnapshot(
-                    slug,
-                    upBid,
-                    upAsk,
-                    downBid,
-                    downAsk,
-                    secondsUntilClose,
-                    secondsSinceOpen,
+                return;
+            }
+
+            referenceOpenPrice.set(
                     strikePriceUsd
             );
 
+            currentEndEpochMillis.set(
+                    endEpochMillis
+            );
+
+            currentWindowOpenEpochMillis.set(
+                    windowOpenEpochMillis
+            );
+
+            log.debug(
+                    "REFRESH result=OFFICIAL_PRICE_TO_BEAT "
+                            + "slug={} priceToBeat={} "
+                            + "secondsSinceOpen={}",
+                    slug,
+                    strikePriceUsd,
+                    secondsSinceOpen
+            );
+
+            /*
+             * Subscribe only for this exact market.
+             */
+            marketWebSocketClient.subscribe(
+                    slug,
+                    (side, bid, ask) ->
+                            onPriceUpdate(
+                                    slug,
+                                    side,
+                                    bid,
+                                    ask
+                            )
+            );
+
+            rebuildSnapshot(
+                    slug,
+                    secondsUntilClose,
+                    secondsSinceOpen
+            );
+
         } catch (Exception e) {
+
             log.error(
-                    "REFRESH result=ERROR detail='exception during Polymarket market refresh'",
+                    "REFRESH result=ERROR",
                     e
             );
         }
     }
 
-    private void handleWindowChange(String slug) {
-        String previousSlug = currentSlug.getAndSet(slug);
-        if (!slug.equals(previousSlug)) {
-            referenceOpenPrice.set(null);
-            upBestBid.set(null);
-            upBestAsk.set(null);
-            downBestBid.set(null);
-            downBestAsk.set(null);
-            latestSnapshot.set(null);
-            lastLoggedSignature.set(null);
-            log.info(
-                    "REFRESH result=NEW_WINDOW slug={} previousSlug={}",
-                    slug,
-                    previousSlug
-            );
-        }
-    }
+    private void rebuildSnapshot(
+            String slug) {
 
-    private void captureReferencePriceIfNeeded(String slug, long secondsSinceOpen) {
-        if (referenceOpenPrice.get() != null) {
+        Long endMillis =
+                currentEndEpochMillis.get();
+
+        Long openMillis =
+                currentWindowOpenEpochMillis.get();
+
+        if (endMillis == null
+                || openMillis == null) {
+
             return;
         }
 
-        BigDecimal openPrice = prices.getAvg60sPrice(SYMBOL) != null
-                ? prices.getAvg60sPrice(SYMBOL)
-                : prices.getPrice(SYMBOL);
+        long nowMillis =
+                polymarketClock.nowMillis();
 
-        if (openPrice == null) {
-            log.info(
-                    "REFRESH result=NO_REFERENCE_PRICE_YET slug={} secondsSinceOpen={} price={} avg60sPrice={}",
-                    slug,
-                    secondsSinceOpen,
-                    prices.getPrice(SYMBOL),
-                    prices.getAvg60sPrice(SYMBOL)
-            );
-            return;
-        }
-
-        referenceOpenPrice.set(openPrice);
-        log.info(
-                "REFRESH result=REFERENCE_PRICE_CAPTURED slug={} referenceOpenPrice={} secondsSinceOpen={}",
+        rebuildSnapshot(
                 slug,
-                openPrice,
-                secondsSinceOpen
+                secondsUntil(
+                        endMillis,
+                        nowMillis
+                ),
+                secondsSince(
+                        openMillis,
+                        nowMillis
+                )
         );
     }
 
-    /**
-     * Rebuilds the snapshot immediately when a WebSocket price changes.
-     * <p>
-     * This is the important part: TradingDecisionService no longer has to wait for the
-     * next Gamma refresh to see a new UP/DOWN price (buy side) or a new bid (sell side).
-     */
-    private void rebuildSnapshot(String slug) {
-        if (!slug.equals(currentSlug.get())) {
+    private void rebuildSnapshot(
+            String slug,
+            long secondsUntilClose,
+            long secondsSinceOpen) {
+
+        if (!slug.equals(
+                currentSlug.get()
+        )) {
+
             return;
         }
 
-        BigDecimal upAsk = upBestAsk.get();
-        BigDecimal downAsk = downBestAsk.get();
-        BigDecimal upBid = upBestBid.get();
-        BigDecimal downBid = downBestBid.get();
-        BigDecimal strikePriceUsd = referenceOpenPrice.get();
+        BigDecimal strikePriceUsd =
+                referenceOpenPrice.get();
 
-        if (upAsk == null || downAsk == null || strikePriceUsd == null) {
+        BigDecimal upAsk =
+                upBestAsk.get();
+
+        BigDecimal downAsk =
+                downBestAsk.get();
+
+        BigDecimal upBid =
+                upBestBid.get();
+
+        BigDecimal downBid =
+                downBestBid.get();
+
+        if (strikePriceUsd == null
+                || upAsk == null
+                || downAsk == null) {
+
             return;
         }
 
-        try {
-            // We need the market end time to calculate the live remaining time.
-            // The existing snapshot remains valid between refreshes, so don't make a Gamma request
-            // for every WS tick.
-            PolymarketMarketSnapshot existing = latestSnapshot.get();
-            if (existing == null || !slug.equals(existing.slug())) {
-                return;
-            }
+        latestSnapshot.set(
+                new PolymarketMarketSnapshot(
+                        slug,
+                        upAsk,
+                        downAsk,
+                        upBid,
+                        downBid,
+                        secondsUntilClose,
+                        strikePriceUsd,
+                        secondsSinceOpen
+                )
+        );
 
-            long secondsUntilClose = existing.secondsUntilClose();
-            long secondsSinceOpen = existing.secondsSinceOpen();
-
-            latestSnapshot.set(
-                    new PolymarketMarketSnapshot(
-                            slug,
-                            upAsk,
-                            downAsk,
-                            upBid,
-                            downBid,
-                            secondsUntilClose,
-                            strikePriceUsd,
-                            secondsSinceOpen
-                    )
-            );
-
-            log.debug(
-                    "CLOB UPDATE slug={} UP bid={} ask={} DOWN bid={} ask={}",
-                    slug,
-                    upBid,
-                    upAsk,
-                    downBid,
-                    downAsk
-            );
-
-        } catch (Exception e) {
-            log.error("Failed rebuilding Polymarket snapshot from CLOB update", e);
-        }
+        log.debug(
+                "SNAPSHOT UPDATED slug={} "
+                        + "UP[bid={},ask={}] "
+                        + "DOWN[bid={},ask={}] "
+                        + "secondsLeft={} "
+                        + "priceToBeat={}",
+                slug,
+                upBid,
+                upAsk,
+                downBid,
+                downAsk,
+                secondsUntilClose,
+                strikePriceUsd
+        );
     }
 
-    private void logSnapshot(
+    private void handleWindowChange(
             String slug,
-            BigDecimal upBid,
-            BigDecimal upAsk,
-            BigDecimal downBid,
-            BigDecimal downAsk,
-            long secondsUntilClose,
-            long secondsSinceOpen,
-            BigDecimal strikePriceUsd) {
+            long windowOpenEpochMillis,
+            long endEpochMillis) {
 
-        String signature = slug
-                + "|" + upBid
-                + "|" + upAsk
-                + "|" + downBid
-                + "|" + downAsk
-                + "|" + strikePriceUsd;
+        String previousSlug =
+                currentSlug.getAndSet(slug);
 
-        String previousSignature = lastLoggedSignature.getAndSet(signature);
-        boolean changed = !signature.equals(previousSignature);
-        boolean heartbeatDue = Duration.between(lastSnapshotHeartbeatAt.get(), Instant.now())
-                .compareTo(SNAPSHOT_HEARTBEAT_INTERVAL) >= 0;
+        boolean changed =
+                !slug.equals(previousSlug);
 
-        if (changed || heartbeatDue) {
-            if (heartbeatDue) {
-                lastSnapshotHeartbeatAt.set(Instant.now());
+        if (!changed) {
+            return;
+        }
+
+        /*
+         * New 5-minute market.
+         *
+         * Completely discard previous market state.
+         */
+        referenceOpenPrice.set(null);
+
+        upBestBid.set(null);
+        upBestAsk.set(null);
+
+        downBestBid.set(null);
+        downBestAsk.set(null);
+
+        latestSnapshot.set(null);
+
+        currentWindowOpenEpochMillis.set(
+                windowOpenEpochMillis
+        );
+
+        currentEndEpochMillis.set(
+                endEpochMillis
+        );
+
+        lastLoggedSignature.set(null);
+
+        lastSnapshotHeartbeatAt.set(
+                Instant.EPOCH
+        );
+
+        log.info(
+                "REFRESH result=NEW_WINDOW "
+                        + "slug={} previousSlug={}",
+                slug,
+                previousSlug
+        );
+    }
+
+    private BigDecimal fetchPriceToBeat(
+            long eventStartEpochMillis,
+            long endEpochMillis) {
+
+        String eventStartTime =
+                Instant
+                        .ofEpochMilli(
+                                eventStartEpochMillis
+                        )
+                        .toString();
+
+        String endDate =
+                Instant
+                        .ofEpochMilli(
+                                endEpochMillis
+                        )
+                        .toString();
+
+        try {
+
+            ResponseEntity<JsonNode> response =
+                    polymarketWebClient
+                            .get()
+                            .uri(uriBuilder ->
+                                    uriBuilder
+                                            .path(
+                                                    CRYPTO_PRICE_PATH
+                                            )
+                                            .queryParam(
+                                                    "symbol",
+                                                    CRYPTO_SYMBOL
+                                            )
+                                            .queryParam(
+                                                    "eventStartTime",
+                                                    eventStartTime
+                                            )
+                                            .queryParam(
+                                                    "variant",
+                                                    CRYPTO_VARIANT
+                                            )
+                                            .queryParam(
+                                                    "endDate",
+                                                    endDate
+                                            )
+                                            .queryParam(
+                                                    "twapEnabled",
+                                                    TWAP_ENABLED
+                                            )
+                                            .queryParam(
+                                                    "twapLookbackSeconds",
+                                                    TWAP_LOOKBACK_SECONDS
+                                            )
+                                            .build()
+                            )
+                            .header(
+                                    HttpHeaders.USER_AGENT,
+                                    "Mozilla/5.0"
+                            )
+                            .header(
+                                    HttpHeaders.ACCEPT,
+                                    "application/json"
+                            )
+                            .retrieve()
+                            .toEntity(
+                                    JsonNode.class
+                            )
+                            .onErrorResume(
+                                    e -> {
+
+                                        log.warn(
+                                                "PRICE_TO_BEAT HTTP_FAILED "
+                                                        + "eventStart={} "
+                                                        + "endDate={} "
+                                                        + "error={}",
+                                                eventStartTime,
+                                                endDate,
+                                                e.getMessage()
+                                        );
+
+                                        return Mono.empty();
+                                    }
+                            )
+                            .block(
+                                    Duration.ofSeconds(10)
+                            );
+
+            if (response == null) {
+                return null;
+            }
+
+            JsonNode body =
+                    response.getBody();
+
+            if (body == null
+                    || body.isNull()) {
+
+                return null;
+            }
+
+            JsonNode openPriceNode =
+                    body.get("openPrice");
+
+            if (openPriceNode == null
+                    || openPriceNode.isNull()) {
+
+                log.warn(
+                        "PRICE_TO_BEAT result=NO_OPEN_PRICE "
+                                + "eventStart={} endDate={} response={}",
+                        eventStartTime,
+                        endDate,
+                        body
+                );
+
+                return null;
+            }
+
+            BigDecimal openPrice =
+                    parsePrice(
+                            openPriceNode
+                    );
+
+            if (openPrice == null
+                    || openPrice.signum() <= 0) {
+
+                log.warn(
+                        "PRICE_TO_BEAT result=INVALID_OPEN_PRICE "
+                                + "openPrice={}",
+                        openPriceNode
+                );
+
+                return null;
             }
 
             log.info(
-                    "REFRESH result=SNAPSHOT_OK slug={} " +
-                            "UP[bid={},ask={}] DOWN[bid={},ask={}] " +
-                            "secondsUntilClose={} secondsSinceOpen={} strikePriceUsd={} changed={}",
-                    slug,
-                    upBid,
-                    upAsk,
-                    downBid,
-                    downAsk,
-                    secondsUntilClose,
-                    secondsSinceOpen,
-                    strikePriceUsd,
-                    changed
+                    "PRICE_TO_BEAT result=SUCCESS "
+                            + "priceToBeat={} "
+                            + "source=POLYMARKET_CRYPTO_PRICE_API "
+                            + "eventStartTime={} "
+                            + "endDate={} "
+                            + "completed={} "
+                            + "incomplete={} "
+                            + "cached={}",
+                    openPrice,
+                    eventStartTime,
+                    endDate,
+                    getBooleanField(
+                            body,
+                            "completed"
+                    ),
+                    getBooleanField(
+                            body,
+                            "incomplete"
+                    ),
+                    getBooleanField(
+                            body,
+                            "cached"
+                    )
             );
+
+            return openPrice;
+
+        } catch (Exception e) {
+
+            log.error(
+                    "PRICE_TO_BEAT result=ERROR "
+                            + "eventStart={} endDate={} "
+                            + "error={}",
+                    eventStartTime,
+                    endDate,
+                    e.getMessage(),
+                    e
+            );
+
+            return null;
         }
     }
 
-    private long parseEndDate(JsonNode market, long fallback) {
-        JsonNode endDateNode = market.get("endDate");
-        if (endDateNode == null || endDateNode.isNull() || endDateNode.asText().isBlank()) {
-            return fallback;
-        }
+    private BigDecimal parsePrice(
+            JsonNode node) {
+
         try {
-            return Instant.parse(endDateNode.asText()).toEpochMilli();
+
+            if (node.isNumber()) {
+                return node.decimalValue();
+            }
+
+            String value =
+                    node.asText();
+
+            if (value == null
+                    || value.isBlank()) {
+
+                return null;
+            }
+
+            return new BigDecimal(
+                    value.trim()
+            );
+
         } catch (Exception e) {
-            log.warn("Could not parse Polymarket endDate: {}", endDateNode);
-            return fallback;
+
+            return null;
+        }
+    }
+
+    private boolean getBooleanField(
+            JsonNode node,
+            String field) {
+
+        JsonNode value =
+                node.get(field);
+
+        return value != null
+                && !value.isNull()
+                && value.asBoolean(false);
+    }
+
+    private Long parseEndDate(
+            JsonNode market) {
+
+        JsonNode endDateNode =
+                market.get("endDate");
+
+        if (endDateNode == null
+                || endDateNode.isNull()
+                || endDateNode.asText().isBlank()) {
+
+            return null;
+        }
+
+        try {
+
+            return Instant
+                    .parse(
+                            endDateNode.asText()
+                    )
+                    .toEpochMilli();
+
+        } catch (Exception e) {
+
+            log.warn(
+                    "Could not parse Polymarket endDate={}",
+                    endDateNode
+            );
+
+            return null;
         }
     }
 
     private String computeCurrentSlug() {
-        long nowSeconds = System.currentTimeMillis() / 1000;
-        long windowSeconds = WINDOW.toSeconds();
-        long windowStart = (nowSeconds / windowSeconds) * windowSeconds;
-        return SLUG_PREFIX + windowStart;
+
+        long nowSeconds =
+                polymarketClock.nowMillis()
+                        / 1000;
+
+        long windowSeconds =
+                WINDOW.toSeconds();
+
+        long windowStart =
+                (nowSeconds / windowSeconds)
+                        * windowSeconds;
+
+        return SLUG_PREFIX
+                + windowStart;
     }
 
-    private JsonNode fetchEventBySlug(String slug) {
-        ResponseEntity<JsonNode> response = gammaWebClient.get()
-                .uri(uriBuilder -> uriBuilder
-                        .path("/events")
-                        .queryParam("slug", slug)
-                        .build()
-                )
-                .retrieve()
-                .toEntity(JsonNode.class)
-                .onErrorResume(e -> {
-                    log.warn("Gamma event lookup failed for slug {}: {}", slug, e.toString());
-                    return Mono.empty();
-                })
-                .block();
+    private long secondsUntil(
+            long endEpochMillis,
+            long nowMillis) {
+
+        return Math.max(
+                0,
+                (endEpochMillis - nowMillis) / 1000
+        );
+    }
+
+    private long secondsSince(
+            long startEpochMillis,
+            long nowMillis) {
+
+        return Math.max(
+                0,
+                (nowMillis - startEpochMillis) / 1000
+        );
+    }
+
+    private JsonNode fetchEventBySlug(
+            String slug) {
+
+        ResponseEntity<JsonNode> response =
+                gammaWebClient
+                        .get()
+                        .uri(
+                                uriBuilder ->
+                                        uriBuilder
+                                                .path(
+                                                        "/events"
+                                                )
+                                                .queryParam(
+                                                        "slug",
+                                                        slug
+                                                )
+                                                .build()
+                        )
+                        .retrieve()
+                        .toEntity(
+                                JsonNode.class
+                        )
+                        .onErrorResume(
+                                e -> {
+
+                                    log.warn(
+                                            "Gamma event lookup failed "
+                                                    + "slug={} error={}",
+                                            slug,
+                                            e.getMessage()
+                                    );
+
+                                    return Mono.empty();
+                                }
+                        )
+                        .block();
 
         if (response == null) {
             return null;
         }
 
-        recordGammaClockSample(response.getHeaders().getFirst(HttpHeaders.DATE));
+        recordGammaClockSample(
+                response
+                        .getHeaders()
+                        .getFirst(
+                                HttpHeaders.DATE
+                        )
+        );
 
-        JsonNode responseBody = response.getBody();
-        if (responseBody == null) {
+        JsonNode body =
+                response.getBody();
+
+        if (body == null) {
             return null;
         }
 
-        if (responseBody.isArray()) {
-            return responseBody.isEmpty() ? null : responseBody.get(0);
+        if (body.isArray()) {
+
+            return body.isEmpty()
+                    ? null
+                    : body.get(0);
         }
 
-        return responseBody;
+        return body;
     }
 
-    private void recordGammaClockSample(String httpDateHeader) {
-        if (httpDateHeader == null) {
+    private void recordGammaClockSample(
+            String httpDateHeader) {
+
+        if (httpDateHeader == null
+                || httpDateHeader.isBlank()) {
+
             return;
         }
+
         try {
-            Instant serverInstant = Instant.from(
-                    DateTimeFormatter.RFC_1123_DATE_TIME.parse(httpDateHeader)
+
+            Instant serverInstant =
+                    Instant.from(
+                            DateTimeFormatter
+                                    .RFC_1123_DATE_TIME
+                                    .parse(
+                                            httpDateHeader
+                                    )
+                    );
+
+            polymarketClock.recordServerTimestamp(
+                    serverInstant.toEpochMilli()
             );
-            polymarketClock.recordServerTimestamp(serverInstant.toEpochMilli());
+
         } catch (Exception e) {
-            log.debug("Failed to parse Gamma Date header '{}'", httpDateHeader);
+
+            log.debug(
+                    "Failed to parse Gamma Date header '{}'",
+                    httpDateHeader
+            );
         }
     }
 }

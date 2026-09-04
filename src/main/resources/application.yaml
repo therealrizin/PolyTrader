@@ -8,6 +8,7 @@ logging:
 
 services:
   polymarket:
+    base_url: ${BASE_POLYMARKET_URL:https://polymarket.com}
     wss_live_data_url: ${POLYMARKET_WSS_LIVE_DATA_URL:wss://ws-live-data.polymarket.com}
     gamma_base_url: ${POLYMARKET_GAMMA_BASE_URL:https://gamma-api.polymarket.com}
     clob_wss_url: ${POLYMARKET_CLOB_WSS_URL:wss://ws-subscriptions-clob.polymarket.com/ws/market}

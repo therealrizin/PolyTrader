@@ -30,11 +30,9 @@ public class TradingDecisionService {
 
     private static final int MIN_SECONDS_TO_ACT = 10;
 
-    private static final Duration SKIP_HEARTBEAT_INTERVAL =
-            Duration.ofSeconds(30);
+    private static final Duration SKIP_HEARTBEAT_INTERVAL = Duration.ofSeconds(30);
 
-    private static final ChainlinkSymbol SYMBOL =
-            ChainlinkSymbol.BTC_USD;
+    private static final ChainlinkSymbol SYMBOL = ChainlinkSymbol.BTC_USD;
 
     private final Prices prices;
     private final TradingEngine tradingEngine;
@@ -77,17 +75,11 @@ public class TradingDecisionService {
         this.liveDataTaskScheduler = liveDataTaskScheduler;
     }
 
-    /**
-     * Starts only the periodic SELL loop.
-     *
-     * BUY decisions are now triggered directly by fresh Chainlink
-     * price updates in ChainlinkPriceStreamClient.
-     */
     public void start() {
 
         ScheduledFuture<?> future =
                 liveDataTaskScheduler.scheduleAtFixedRate(
-                        this::evaluateSellOnly,
+                        this::periodicTick,
                         Instant.now().plusSeconds(1),
                         Duration.ofSeconds(1)
                 );
@@ -121,9 +113,20 @@ public class TradingDecisionService {
     /**
      * Called immediately after a fresh Chainlink BTC price update.
      *
-     * This is now the real-time BUY trigger.
+     * This is now the real-time BUY *and* SELL trigger: any open
+     * position is re-checked against the freshest price/EV on every
+     * tick, then a BUY is attempted if no position is open.
      */
     public void onChainlinkPriceUpdate() {
+
+        try {
+            evaluateSell();
+        } catch (Exception e) {
+            log.error(
+                    "Error during immediate Chainlink SELL evaluation",
+                    e
+            );
+        }
 
         try {
             evaluateBuyImmediately();
@@ -425,7 +428,7 @@ public class TradingDecisionService {
                                 snapshot,
                                 MarketSide.UP,
                                 BigDecimal.valueOf(upMaxPrice),
-                                0.0,
+                                estimate.upEv(),
                                 estimate.upChance()
                         );
 
@@ -482,7 +485,7 @@ public class TradingDecisionService {
                                 snapshot,
                                 MarketSide.DOWN,
                                 BigDecimal.valueOf(downMaxPrice),
-                                0.0,
+                                estimate.downEv(),
                                 estimate.downChance()
                         );
 
@@ -515,71 +518,91 @@ public class TradingDecisionService {
     }
 
     /**
-     * Only SELL logic remains on the periodic scheduler.
+     * Runs on the 1-second scheduler as a backup: settles any mock
+     * bets whose resolution time has passed, then re-checks SELL as a
+     * safety net in case a price tick was missed.
      */
-    private void evaluateSellOnly() {
+    private void periodicTick() {
 
         try {
-
             mockBetService.settleDueBets();
-
-            Optional<PolymarketMarketSnapshot> snapshotOpt =
-                    marketDataProvider.currentSnapshot();
-
-            if (snapshotOpt.isEmpty()) {
-                return;
-            }
-
-            PolymarketMarketSnapshot snapshot =
-                    snapshotOpt.get();
-
-            if (tradingProperties.mock()) {
-
-                List<MockBet> soldBets =
-                        mockBetService
-                                .evaluateSellForAllStrategies(snapshot);
-
-                for (MockBet bet : soldBets) {
-
-                    log.info(
-                            "DECISION action=SOLD (MOCK) strategy={} slug={} side={} boughtAt={} soldAt={} profitLoss={}",
-                            bet.strategyId(),
-                            bet.marketSlug(),
-                            bet.side(),
-                            bet.marketPriceAtBet(),
-                            bet.priceAtResolution(),
-                            bet.profitLoss()
-                    );
-                }
-
-            } else {
-
-                if (!realBetService.hasOpenBetFor(snapshot.slug())) {
-                    return;
-                }
-
-                Optional<RealBet> sold =
-                        realBetService.sellOpenPosition(
-                                snapshot
-                        );
-
-                sold.ifPresent(
-                        bet -> log.info(
-                                "DECISION action=SOLD (REAL) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
-                                bet.marketSlug(),
-                                bet.side(),
-                                bet.price(),
-                                bet.soldPrice(),
-                                bet.profitLoss()
-                        )
-                );
-            }
-
         } catch (Exception e) {
+            log.error(
+                    "Error during mock bet settlement sweep",
+                    e
+            );
+        }
 
+        try {
+            evaluateSell();
+        } catch (Exception e) {
             log.error(
                     "Error during periodic SELL evaluation",
                     e
+            );
+        }
+    }
+
+    /**
+     * SELL check. Called on every Chainlink price tick (the primary
+     * trigger) and again on the 1-second scheduler (backup, in case a
+     * tick is missed or the stream stalls).
+     *
+     * Cheap/idempotent to call twice in the same instant: it only
+     * acts when a position is actually open and sellingEv clears the
+     * threshold.
+     */
+    private void evaluateSell() {
+
+        Optional<PolymarketMarketSnapshot> snapshotOpt =
+                marketDataProvider.currentSnapshot();
+
+        if (snapshotOpt.isEmpty()) {
+            return;
+        }
+
+        PolymarketMarketSnapshot snapshot =
+                snapshotOpt.get();
+
+        if (tradingProperties.mock()) {
+
+            List<MockBet> soldBets =
+                    mockBetService
+                            .evaluateSellForAllStrategies(snapshot);
+
+            for (MockBet bet : soldBets) {
+
+                log.info(
+                        "DECISION action=SOLD (MOCK) strategy={} slug={} side={} boughtAt={} soldAt={} profitLoss={}",
+                        bet.strategyId(),
+                        bet.marketSlug(),
+                        bet.side(),
+                        bet.marketPriceAtBet(),
+                        bet.priceAtResolution(),
+                        bet.profitLoss()
+                );
+            }
+
+        } else {
+
+            if (!realBetService.hasOpenBetFor(snapshot.slug())) {
+                return;
+            }
+
+            Optional<RealBet> sold =
+                    realBetService.sellOpenPosition(
+                            snapshot
+                    );
+
+            sold.ifPresent(
+                    bet -> log.info(
+                            "DECISION action=SOLD (REAL) slug={} side={} boughtAt={} soldAt={} profitLoss={}",
+                            bet.marketSlug(),
+                            bet.side(),
+                            bet.price(),
+                            bet.soldPrice(),
+                            bet.profitLoss()
+                    )
             );
         }
     }

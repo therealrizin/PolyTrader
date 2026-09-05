@@ -38,6 +38,19 @@ public class BetService {
     private static final int USDC_SCALE = 2;
     private static final BigDecimal MIN_ORDER_USDC = new BigDecimal("1.00");
 
+    // Fixed positive EV fraction (of minimumExpectedEv) required to sell an open
+    // position. Decoupled from the model's current winChance/keepEv (which can
+    // be negative and would otherwise let us sell at a loss "to reduce damage")
+    // and from minimumWinChance (which never gated selling).
+    private static final double SELL_EV_FRACTION_OF_MINIMUM = 1.0 / 3.0;
+
+    // Minimum time between SELL attempts for the same bet. We no longer gate
+    // submission on a locally cached best-bid (see sellOpenPosition) so we
+    // submit a fresh FOK sell attempt on essentially every eligible price tick;
+    // this cooldown just prevents hammering the executor when ticks arrive
+    // faster than ~a few per second.
+    private static final Duration SELL_ATTEMPT_MIN_INTERVAL = Duration.ofMillis(300);
+
     private final TradingProperties tradingProperties;
     private final PolymarketMarketResolver marketResolver;
     private final WebClient executionWebClient;
@@ -47,6 +60,7 @@ public class BetService {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Set<String> openSlugs = ConcurrentHashMap.newKeySet();
     private final Map<String, Bet> bets = new ConcurrentHashMap<>();
+    private final Map<String, Instant> lastSellAttemptAt = new ConcurrentHashMap<>();
 
     public BetService(TradingProperties tradingProperties, PolymarketMarketResolver marketResolver,
                       @Qualifier("executionWebClient") WebClient executionWebClient, Prices prices, TradingEngine tradingEngine) {
@@ -96,11 +110,16 @@ public class BetService {
             }
             assertMaxDecimals(amountUsdc, USDC_SCALE, "BUY amountUsdc");
 
-            BigDecimal estimatedSize = amountUsdc.divide(tickSafePrice, BUY_SIZE_SCALE, RoundingMode.DOWN);
+            BigDecimal estimatedSize = amountUsdc.divide(tickSafePrice, BUY_SIZE_SCALE, RoundingMode.UP);
             if (estimatedSize.signum() <= 0) {
                 throw new IllegalStateException("Calculated BUY size is zero: amount=" + amountUsdc + ", price=" + tickSafePrice);
             }
             assertMaxDecimals(estimatedSize, BUY_SIZE_SCALE, "BUY estimatedSize");
+
+            BigDecimal sizeTick = BigDecimal.ONE.movePointLeft(BUY_SIZE_SCALE);
+            while (estimatedSize.multiply(tickSafePrice).compareTo(MIN_ORDER_USDC) < 0) {
+                estimatedSize = estimatedSize.add(sizeTick);
+            }
 
             String clientBetId = UUID.randomUUID().toString();
             PolymarketMarketResolver.ResolvedMarket market = marketResolver.resolveCurrentMarket()
@@ -215,26 +234,36 @@ public class BetService {
         BigDecimal costBasis = bet.costUsdc() != null ? bet.costUsdc() : bet.amount();
         double avgFillPrice = costBasis.doubleValue() / bet.size().doubleValue();
 
-        double keepEv = winChance / avgFillPrice - 1.0;
-        double requiredSellEv = keepEv * tradingProperties.sellEvMultiplier();
+        // Fixed positive EV threshold, independent of the current winChance/keepEv
+        // and independent of minimumWinChance. We only sell when it locks in a real
+        // profit over cost basis - never as a "reduce the loss" exit.
+        double requiredSellEv = tradingProperties.minimumExpectedEv() * SELL_EV_FRACTION_OF_MINIMUM;
         double targetNetValue = avgFillPrice * (1.0 + requiredSellEv);
         double minSellPrice = tradingEngine.minSellPriceForNetValue(targetNetValue);
 
+        // currentBid/sellingEv are logged for visibility only. We deliberately do NOT
+        // gate submission on them: that cached best-bid comes from our own websocket
+        // book snapshot and lags the real order book. Waiting for it to already show
+        // a qualifying price means we react to stale data and miss fills that were
+        // briefly available. Instead we submit a FOK sell at minSellPrice on every
+        // eligible tick and let the exchange's live book decide fillability - FOK
+        // harmlessly rejects if it can't match at that price or better.
         BigDecimal currentBid = bet.side() == MarketSide.UP ? snapshot.upBid() : snapshot.downBid();
         double sellingEv = currentBid != null && currentBid.signum() > 0
                 ? tradingEngine.netSellValuePerShare(currentBid.doubleValue()) / avgFillPrice - 1.0
                 : Double.NaN;
 
-        log.info("SELL_CHECK (REAL) slug={} betId={} side={} winChance={} avgFillPrice={} keepEv={} requiredSellEv={} minSellPrice={} currentBid={} sellingEv={} btcLivePrice={} btcPriceToAchieve={} secondsLeft={}",
-                slug, bet.id(), bet.side(), round(winChance), round(avgFillPrice), round(keepEv), round(requiredSellEv), round(minSellPrice), currentBid, round(sellingEv), currentLivePrice, strike, snapshot.secondsUntilClose());
+        log.info("SELL_CHECK (REAL) slug={} betId={} side={} winChance={} avgFillPrice={} requiredSellEv={} minSellPrice={} currentBid={} sellingEv={} btcLivePrice={} btcPriceToAchieve={} secondsLeft={}",
+                slug, bet.id(), bet.side(), round(winChance), round(avgFillPrice), round(requiredSellEv), round(minSellPrice), currentBid, round(sellingEv), currentLivePrice, strike, snapshot.secondsUntilClose());
 
-        if (currentBid == null || currentBid.doubleValue() < minSellPrice) {
-            log.debug("SELL_CHECK (REAL) slug={} betId={} -> hold (best bid {} below floor {})", slug, bet.id(), currentBid, round(minSellPrice));
+        if (!canAttemptSell(bet.id())) {
             return Optional.empty();
         }
 
         try {
-            return Optional.of(executeSell(bet, minSellPrice, winChance, requiredSellEv));
+            Bet sold = executeSell(bet, minSellPrice, winChance, requiredSellEv);
+            lastSellAttemptAt.remove(bet.id());
+            return Optional.of(sold);
         } catch (FokNotFilledException e) {
             log.info("REAL FOK SELL NOT FILLED: slug={} betId={} side={} price={} reason={}", slug, bet.id(), bet.side(), round(minSellPrice), e.getMessage());
             return Optional.empty();
@@ -242,6 +271,16 @@ public class BetService {
             log.error("REAL SELL FAILED: id={} slug={} side={}", bet.id(), slug, bet.side(), e);
             return Optional.empty();
         }
+    }
+
+    private boolean canAttemptSell(String betId) {
+        Instant now = Instant.now();
+        Instant previous = lastSellAttemptAt.get(betId);
+        if (previous != null && Duration.between(previous, now).compareTo(SELL_ATTEMPT_MIN_INTERVAL) < 0) {
+            return false;
+        }
+        lastSellAttemptAt.put(betId, now);
+        return true;
     }
 
     private Bet findOpenBetForSlug(String slug) {

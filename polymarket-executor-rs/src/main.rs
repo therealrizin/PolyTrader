@@ -214,85 +214,102 @@ async fn place_order(
 
     let is_gtd = matches!(order_type, PolyOrderType::GTD);
 
+    // Order construction differs by (order_type, side):
+    //
+    // - FOK/FAK + BUY: pure amount-based "market" order (Amount::usdc). This is
+    //   deliberately NOT built from an explicit price+size pair. Polymarket
+    //   treats FOK/FAK as "market orders", and for a market BUY the maker_amount
+    //   (USDC paid) must resolve to <=2 decimal places while the taker_amount
+    //   (shares received) may have up to 4. Since our price always has exactly
+    //   2 decimals and a computed size also has 2 decimals, their PRODUCT
+    //   generically lands on 4 decimal places (e.g. 0.41 * 2.43 = 0.9963),
+    //   which the API rejects as "invalid amounts ... maker amount supports a
+    //   max accuracy of 2 decimals". Passing amount_usdc alone sidesteps this
+    //   entirely: amount_usdc is already exact at 2dp, and the exchange derives
+    //   the (up to 4dp) share count itself. Trade-off: this order type has no
+    //   native price ceiling from our side - see BetService.java notes for how
+    //   that risk is now covered on the sell side instead.
+    // - FOK/FAK + SELL: explicit price+size limit-style order. Here the
+    //   constrained field is maker_amount = shares = size (which we already
+    //   fix at exactly 2dp), and taker_amount = USDC received (price*size,
+    //   allowed up to 4dp) - so this direction is naturally safe and lets us
+    //   enforce our EV-derived minimum sell price.
+    // - GTC/GTD (either side): unchanged, explicit resting limit order.
     let order = match order_type {
-        PolyOrderType::FOK | PolyOrderType::FAK => {
-            let amount = match side {
-                PolySide::Buy => {
-                    let amount_usdc = match req.amount_usdc.as_deref() {
-                        Some(value) => value,
-                        None => {
-                            return bad_request(
-                                "amount_usdc is required for BUY FOK/FAK orders",
-                            );
-                        }
-                    };
-
-                    let amount_decimal =
-                        match Decimal::try_from(amount_usdc) {
-                            Ok(value) => value,
-                            Err(e) => {
-                                return bad_request(&format!(
-                                    "Invalid amount_usdc: {e}"
-                                ));
-                            }
-                        };
-
-                    match Amount::usdc(amount_decimal) {
-                        Ok(amount) => amount,
-                        Err(e) => {
-                            return bad_request(&format!(
-                                "Invalid USDC amount: {e}"
-                            ));
-                        }
+        PolyOrderType::FOK | PolyOrderType::FAK => match side {
+            PolySide::Buy => {
+                let amount_usdc = match req.amount_usdc.as_deref() {
+                    Some(value) => value,
+                    None => {
+                        return bad_request(
+                            "amount_usdc is required for BUY FOK/FAK orders",
+                        );
                     }
-                }
+                };
 
-                PolySide::Sell => {
-                    let shares_decimal =
-                        match Decimal::try_from(req.size.as_str()) {
-                            Ok(value) => value,
-                            Err(e) => {
-                                return bad_request(&format!(
-                                    "Invalid SELL share amount: {e}"
-                                ));
-                            }
-                        };
-
-                    match Amount::shares(shares_decimal) {
-                        Ok(amount) => amount,
-                        Err(e) => {
-                            return bad_request(&format!(
-                                "Invalid SELL share amount: {e}"
-                            ));
-                        }
+                let amount_decimal = match Decimal::try_from(amount_usdc) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        return bad_request(&format!("Invalid amount_usdc: {e}"));
                     }
-                }
+                };
 
-                _ => {
-                    return bad_request("Unsupported order side");
-                }
-            };
+                let amount = match Amount::usdc(amount_decimal) {
+                    Ok(amount) => amount,
+                    Err(e) => {
+                        return bad_request(&format!("Invalid USDC amount: {e}"));
+                    }
+                };
 
-            info!(
-                "Building {:?} market order: side={:?}, token_id={}, \
-                 size={}, amount_usdc={:?}",
-                order_type,
-                side,
-                req.token_id,
-                req.size,
-                req.amount_usdc
-            );
+                info!(
+                    "Building {:?} market BUY order (amount-based): token_id={}, \
+                     amount_usdc={}",
+                    order_type, req.token_id, amount_usdc
+                );
 
-            state
-                .client
-                .market_order()
-                .token_id(token_id)
-                .amount(amount)
-                .side(side)
-                .order_type(order_type.clone())
-                .build()
-                .await
-        }
+                state
+                    .client
+                    .market_order()
+                    .token_id(token_id)
+                    .amount(amount)
+                    .side(side)
+                    .order_type(order_type.clone())
+                    .build()
+                    .await
+            }
+            PolySide::Sell => {
+                let price_decimal = match Decimal::try_from(req.price.as_str()) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        return bad_request(&format!("Invalid price: {e}"));
+                    }
+                };
+
+                let size_decimal = match Decimal::try_from(req.size.as_str()) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        return bad_request(&format!("Invalid SELL share amount: {e}"));
+                    }
+                };
+
+                info!(
+                    "Building {:?} price-protected SELL order: token_id={}, \
+                     price={}, size={}",
+                    order_type, req.token_id, req.price, req.size
+                );
+
+                state
+                    .client
+                    .limit_order()
+                    .token_id(token_id)
+                    .price(price_decimal)
+                    .size(size_decimal)
+                    .side(side)
+                    .order_type(order_type.clone())
+                    .build()
+                    .await
+            }
+        },
 
         PolyOrderType::GTC | PolyOrderType::GTD => {
             let price_decimal = match Decimal::try_from(req.price.as_str()) {
@@ -324,10 +341,6 @@ async fn place_order(
             }
 
             builder.build().await
-        }
-
-        _ => {
-            return bad_request("Unsupported order_type");
         }
     };
 

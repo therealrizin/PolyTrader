@@ -115,7 +115,7 @@ public class TradingDecisionService {
             log.debug("DECISION action=FOK_NOT_FILLED slug={} side={} betPrice={} winChance={}",
                     snapshot.slug(), side, betPrice, round(chance));
         } catch (Exception e) {
-            log.error("DECISION action=FOK_FAILED slug={} side={}", snapshot.slug(), side, e);
+            log.error("DECISION action=FOK_FAILED slug={} side={} reason={}", snapshot.slug(), side, e.getMessage());
         }
         return betService.hasOpenBetFor(snapshot.slug());
     }

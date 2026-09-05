@@ -27,6 +27,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Service
@@ -37,19 +39,13 @@ public class BetService {
     private static final int BUY_SIZE_SCALE = 2;
     private static final int USDC_SCALE = 2;
     private static final BigDecimal MIN_ORDER_USDC = new BigDecimal("1.00");
-
-    // Fixed positive EV fraction (of minimumExpectedEv) required to sell an open
-    // position. Decoupled from the model's current winChance/keepEv (which can
-    // be negative and would otherwise let us sell at a loss "to reduce damage")
-    // and from minimumWinChance (which never gated selling).
     private static final double SELL_EV_FRACTION_OF_MINIMUM = 1.0 / 3.0;
-
-    // Minimum time between SELL attempts for the same bet. We no longer gate
-    // submission on a locally cached best-bid (see sellOpenPosition) so we
-    // submit a fresh FOK sell attempt on essentially every eligible price tick;
-    // this cooldown just prevents hammering the executor when ticks arrive
-    // faster than ~a few per second.
     private static final Duration SELL_ATTEMPT_MIN_INTERVAL = Duration.ofMillis(300);
+    private static final BigDecimal MAX_ACCEPTABLE_PRICE_OVERSHOOT = new BigDecimal("0.05"); // 5 cents
+    private static final int CIRCUIT_BREAKER_TRIP_THRESHOLD = 3; // consecutive breaches
+
+    private final AtomicInteger consecutiveSlippageBreaches = new AtomicInteger(0);
+    private final AtomicBoolean circuitBreakerTripped = new AtomicBoolean(false);
 
     private final TradingProperties tradingProperties;
     private final PolymarketMarketResolver marketResolver;
@@ -75,8 +71,19 @@ public class BetService {
         return openSlugs.contains(slug);
     }
 
+    public boolean isCircuitBreakerTripped() {
+        return circuitBreakerTripped.get();
+    }
+
     public Bet placeBet(PolymarketMarketSnapshot snapshot, MarketSide side, Double maxBetPrice, double countedEv,
                         double countedWinChance, ChainlinkSymbol symbol) {
+        if (circuitBreakerTripped.get()) {
+            throw new IllegalStateException(
+                    "BUY circuit breaker is tripped after repeated slippage breaches " +
+                            "(fills far worse than the requested price limit). Refusing new bets " +
+                            "until the executor's price-bound behavior is verified and this is reset " +
+                            "(restart the service once fixed).");
+        }
         if (snapshot == null) {
             throw new IllegalArgumentException("Polymarket snapshot cannot be null");
         }
@@ -109,7 +116,6 @@ public class BetService {
                 throw new IllegalStateException("Configured bet amount becomes " + amountUsdc + " after cent rounding");
             }
             assertMaxDecimals(amountUsdc, USDC_SCALE, "BUY amountUsdc");
-
             BigDecimal estimatedSize = amountUsdc.divide(tickSafePrice, BUY_SIZE_SCALE, RoundingMode.UP);
             if (estimatedSize.signum() <= 0) {
                 throw new IllegalStateException("Calculated BUY size is zero: amount=" + amountUsdc + ", price=" + tickSafePrice);
@@ -146,7 +152,7 @@ public class BetService {
                 String errorBody = e.getResponseBodyAsString();
                 log.error("Executor BUY rejected: status={} body={} requestPrice={} requestAmountUsdc={} requestSize={}",
                         e.getStatusCode(), errorBody, tickSafePrice, amountUsdc, estimatedSize);
-                throw new IllegalStateException("Executor rejected BUY order: " + errorBody, e);
+                throw new IllegalStateException("Executor rejected BUY order: " + errorBody);
             }
 
             if (response == null) {
@@ -172,6 +178,8 @@ public class BetService {
             double avgFillPrice = actualCostUsdc.doubleValue() / actualSize.doubleValue();
             double realizedEv = tradingEngine.realizedBuyEv(countedWinChance, avgFillPrice);
 
+            checkSlippageAndUpdateBreaker(slug, side, tickSafePrice, avgFillPrice);
+
             Instant placedAt = Instant.now();
             Bet bet = new Bet(clientBetId, response.orderId(), tokenId, slug, side, amountUsdc, tickSafePrice, actualSize,
                     realizedEv, countedWinChance, placedAt, snapshot.secondsUntilClose(), BetStatus.OPEN, null, null, null,
@@ -188,9 +196,26 @@ public class BetService {
             if (e instanceof FokNotFilledException) {
                 log.info("REAL FOK BUY DID NOT FILL: slug={} side={} reason={}", slug, side, e.getMessage());
             } else {
-                log.error("REAL FOK BUY FAILED: slug={} side={}", slug, side, e);
+                log.error("REAL FOK BUY FAILED: slug={} side={} reason={}", slug, side, e.getMessage());
             }
             throw e;
+        }
+    }
+
+    private void checkSlippageAndUpdateBreaker(String slug, MarketSide side, BigDecimal requestedMaxPrice, double avgFillPrice) {
+        BigDecimal overshoot = BigDecimal.valueOf(avgFillPrice).subtract(requestedMaxPrice);
+        if (overshoot.compareTo(MAX_ACCEPTABLE_PRICE_OVERSHOOT) > 0) {
+            int breaches = consecutiveSlippageBreaches.incrementAndGet();
+            log.error("SLIPPAGE_BREACH slug={} side={} requestedMaxPrice={} actualFillPrice={} overshoot={} consecutiveBreaches={} - " +
+                            "the executor filled far worse than the requested price ceiling. This should not happen if the " +
+                            "BUY price bound is being enforced; treat this as a critical executor bug until resolved.",
+                    slug, side, requestedMaxPrice, round(avgFillPrice), overshoot.setScale(4, RoundingMode.HALF_UP), breaches);
+            if (breaches >= CIRCUIT_BREAKER_TRIP_THRESHOLD && circuitBreakerTripped.compareAndSet(false, true)) {
+                log.error("CIRCUIT_BREAKER_TRIPPED: {} consecutive slippage breaches. Refusing further BUYs until the executor's " +
+                        "price-bound behavior is verified and the service is restarted.", breaches);
+            }
+        } else {
+            consecutiveSlippageBreaches.set(0);
         }
     }
 
@@ -233,21 +258,10 @@ public class BetService {
 
         BigDecimal costBasis = bet.costUsdc() != null ? bet.costUsdc() : bet.amount();
         double avgFillPrice = costBasis.doubleValue() / bet.size().doubleValue();
-
-        // Fixed positive EV threshold, independent of the current winChance/keepEv
-        // and independent of minimumWinChance. We only sell when it locks in a real
-        // profit over cost basis - never as a "reduce the loss" exit.
         double requiredSellEv = tradingProperties.minimumExpectedEv() * SELL_EV_FRACTION_OF_MINIMUM;
         double targetNetValue = avgFillPrice * (1.0 + requiredSellEv);
         double minSellPrice = tradingEngine.minSellPriceForNetValue(targetNetValue);
 
-        // currentBid/sellingEv are logged for visibility only. We deliberately do NOT
-        // gate submission on them: that cached best-bid comes from our own websocket
-        // book snapshot and lags the real order book. Waiting for it to already show
-        // a qualifying price means we react to stale data and miss fills that were
-        // briefly available. Instead we submit a FOK sell at minSellPrice on every
-        // eligible tick and let the exchange's live book decide fillability - FOK
-        // harmlessly rejects if it can't match at that price or better.
         BigDecimal currentBid = bet.side() == MarketSide.UP ? snapshot.upBid() : snapshot.downBid();
         double sellingEv = currentBid != null && currentBid.signum() > 0
                 ? tradingEngine.netSellValuePerShare(currentBid.doubleValue()) / avgFillPrice - 1.0
@@ -268,7 +282,7 @@ public class BetService {
             log.info("REAL FOK SELL NOT FILLED: slug={} betId={} side={} price={} reason={}", slug, bet.id(), bet.side(), round(minSellPrice), e.getMessage());
             return Optional.empty();
         } catch (Exception e) {
-            log.error("REAL SELL FAILED: id={} slug={} side={}", bet.id(), slug, bet.side(), e);
+            log.error("REAL SELL FAILED: id={} slug={} side={} reason={}", bet.id(), slug, bet.side(), e.getMessage());
             return Optional.empty();
         }
     }
@@ -317,7 +331,7 @@ public class BetService {
         } catch (WebClientResponseException e) {
             String errorBody = e.getResponseBodyAsString();
             log.error("Executor SELL rejected: status={} body={} requestPrice={} requestSize={}", e.getStatusCode(), errorBody, sellPrice, sellSize);
-            throw new IllegalStateException("Executor rejected SELL order: " + errorBody, e);
+            throw new IllegalStateException("Executor rejected SELL order: " + errorBody);
         }
 
         if (response == null) {
@@ -362,7 +376,7 @@ public class BetService {
         try {
             log.info("REAL FOK BUY REQUEST JSON: {}", objectMapper.writeValueAsString(request));
         } catch (Exception e) {
-            log.warn("Failed to serialize BUY request JSON", e);
+            log.warn("Failed to serialize BUY request JSON: {}", e.getMessage());
         }
 
         BigDecimal currentLivePrice = prices.getPrice(symbol);
@@ -375,7 +389,7 @@ public class BetService {
         try {
             log.info("REAL FOK SELL REQUEST JSON: {}", objectMapper.writeValueAsString(request));
         } catch (Exception e) {
-            log.warn("Failed to serialize SELL request JSON", e);
+            log.warn("Failed to serialize SELL request JSON: {}", e.getMessage());
         }
         log.info("BET_DECISION mode=REAL action=SUBMITTING_SELL slug={} tokenId={} | winChance={} threshold={} | price={} size={}",
                 request.marketSlug(), request.tokenId(), round(winChance), round(sellThreshold), price, size);

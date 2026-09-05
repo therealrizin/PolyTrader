@@ -216,25 +216,22 @@ async fn place_order(
 
     // Order construction differs by (order_type, side):
     //
-    // - FOK/FAK + BUY: pure amount-based "market" order (Amount::usdc). This is
-    //   deliberately NOT built from an explicit price+size pair. Polymarket
-    //   treats FOK/FAK as "market orders", and for a market BUY the maker_amount
-    //   (USDC paid) must resolve to <=2 decimal places while the taker_amount
-    //   (shares received) may have up to 4. Since our price always has exactly
-    //   2 decimals and a computed size also has 2 decimals, their PRODUCT
-    //   generically lands on 4 decimal places (e.g. 0.41 * 2.43 = 0.9963),
-    //   which the API rejects as "invalid amounts ... maker amount supports a
-    //   max accuracy of 2 decimals". Passing amount_usdc alone sidesteps this
-    //   entirely: amount_usdc is already exact at 2dp, and the exchange derives
-    //   the (up to 4dp) share count itself. Trade-off: this order type has no
-    //   native price ceiling from our side - see BetService.java notes for how
-    //   that risk is now covered on the sell side instead.
+    // - FOK/FAK + BUY: amount-based market order (Amount::usdc), WITH a worst
+    //   acceptable price attached. maker_amount stays exactly amount_usdc
+    //   (already <=2dp, so no precision rejection), while `.price(...)` caps
+    //   how far the matching engine is allowed to walk the book. Without this
+    //   price bound, a BUY FOK will fill at whatever price the book offers -
+    //   observed filling ~0.35 above the intended entry, turning a positive-EV
+    //   decision into a large realized loss. This is NOT optional.
     // - FOK/FAK + SELL: explicit price+size limit-style order. Here the
-    //   constrained field is maker_amount = shares = size (which we already
-    //   fix at exactly 2dp), and taker_amount = USDC received (price*size,
-    //   allowed up to 4dp) - so this direction is naturally safe and lets us
-    //   enforce our EV-derived minimum sell price.
+    //   constrained field is maker_amount = shares = size (fixed at exactly
+    //   2dp), and taker_amount = USDC received (price*size, allowed up to
+    //   4dp) - naturally safe, and enforces our EV-derived minimum sell price.
     // - GTC/GTD (either side): unchanged, explicit resting limit order.
+    //
+    // NOTE: both `OrderType` and `Side` are #[non_exhaustive] in the SDK, so
+    // Rust requires wildcard arms below even though both were already fully
+    // validated against known strings above.
     let order = match order_type {
         PolyOrderType::FOK | PolyOrderType::FAK => match side {
             PolySide::Buy => {
@@ -261,17 +258,40 @@ async fn place_order(
                     }
                 };
 
+                let worst_price = match Decimal::try_from(req.price.as_str()) {
+                    Ok(value) => value,
+                    Err(e) => {
+                        return bad_request(&format!("Invalid price: {e}"));
+                    }
+                };
+
                 info!(
-                    "Building {:?} market BUY order (amount-based): token_id={}, \
-                     amount_usdc={}",
-                    order_type, req.token_id, amount_usdc
+                    "Building {:?} market BUY order (amount-based, worst_price={}): \
+                     token_id={}, amount_usdc={}",
+                    order_type, req.price, req.token_id, amount_usdc
                 );
 
+                // IMPORTANT: `.price(worst_price)` here is the WORST acceptable
+                // fill price, used only as a matching-engine cap - it does NOT
+                // participate in the maker_amount calculation (that stays
+                // `amount`), so it does not reintroduce the earlier
+                // "max accuracy of 2 decimals" rejection.
+                //
+                // If this exact method name doesn't exist on this SDK version,
+                // the compiler will fail here with a clear "no method named
+                // `price` found for struct `MarketOrderBuilder`" (or similar)
+                // error. In that case inspect the builder's real API via:
+                //   cargo doc --open -p polymarket_client_sdk_v2
+                // or grep the vendored source:
+                //   ~/.cargo/git/checkouts/rs-clob-client-v2-*/*/src/clob/order/
+                // for the MarketOrderBuilder definition - the correct method is
+                // likely one of: `price`, `worst_price`, `max_price`, `limit_price`.
                 state
                     .client
                     .market_order()
                     .token_id(token_id)
                     .amount(amount)
+                    .price(worst_price)
                     .side(side)
                     .order_type(order_type.clone())
                     .build()
@@ -309,6 +329,9 @@ async fn place_order(
                     .build()
                     .await
             }
+            _ => {
+                return bad_request("Unsupported order side");
+            }
         },
 
         PolyOrderType::GTC | PolyOrderType::GTD => {
@@ -341,6 +364,10 @@ async fn place_order(
             }
 
             builder.build().await
+        }
+
+        _ => {
+            return bad_request("Unsupported order_type");
         }
     };
 

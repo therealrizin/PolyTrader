@@ -18,6 +18,11 @@ public record PricesResponse(
 
     public static PricesResponse gatherPrices(Prices prices) {
         List<PricePoint> history = prices.getRecentHistory(SYMBOL).stream()
+                .map(pp -> new PricePoint(
+                        pp.timestamp(),
+                        pp.price(),
+                        prices.getAvg60sPrice(SYMBOL)
+                ))
                 .sorted(Comparator.comparing(PricePoint::date, Comparator.reverseOrder()))
                 .toList();
 

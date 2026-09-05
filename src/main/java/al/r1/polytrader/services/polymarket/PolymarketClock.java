@@ -12,11 +12,6 @@ public class PolymarketClock {
     private final AtomicLong offsetMillis = new AtomicLong(0);
     private volatile boolean hasSample = false;
 
-    /**
-     * @param serverEpochMillis a timestamp Polymarket itself reported for
-     *                          "now" (an HTTP Date header, or an RTDS
-     *                          payload timestamp)
-     */
     public void recordServerTimestamp(long serverEpochMillis) {
         long localNow = System.currentTimeMillis();
         long newOffset = serverEpochMillis - localNow;

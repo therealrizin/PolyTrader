@@ -24,10 +24,10 @@ public class Prices {
     public static final long MAX_PRICE_AGE_MILLIS = 500L;
     private static final long MAX_FUTURE_SKEW_MILLIS = 1_000L;
 
-    private record PriceObservation(long observedAtMillis, BigDecimal price) {}
-    private record PricePoint(LocalDateTime timestamp, BigDecimal price) {}
+    public record PriceObservation(long observedAtMillis, BigDecimal price) {}
+    public record PricePoint(LocalDateTime timestamp, BigDecimal price) {}
 
-    private record SymbolState(
+    public record SymbolState(
             AtomicReference<BigDecimal> price,
             AtomicReference<BigDecimal> avg60sPrice,
             AtomicLong lastObservedAtMillis,
@@ -156,9 +156,5 @@ public class Prices {
 
     public void setBinancePrice(BigDecimal price) {
         setProviderPrice(PriceProviders.BINANCE, price);
-    }
-
-    public void setPolymarketPrice(BigDecimal price) {
-        setProviderPrice(PriceProviders.POLYMARKET, price);
     }
 }

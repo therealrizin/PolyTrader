@@ -11,5 +11,6 @@ public record TradingProperties(
         double minimumWinChance,
         double takerFee,
         BigDecimal betAmount,
-        int minimumSecondsSinceOpen
+        int minimumSecondsSinceOpen,
+        double sellEvMultiplier
 ) {}

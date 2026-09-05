@@ -22,6 +22,7 @@ public record Bet(
         BetStatus status,
         @JsonProperty("sell_order_id") String sellOrderId,
         @JsonProperty("sold_price") BigDecimal soldPrice,
-        @JsonProperty("profit_loss") BigDecimal profitLoss
+        @JsonProperty("profit_loss") BigDecimal profitLoss,
+        @JsonProperty("cost_usdc") BigDecimal costUsdc
 ) {
 }

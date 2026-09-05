@@ -216,21 +216,6 @@ async fn place_order(
 
     let order = match order_type {
         PolyOrderType::FOK | PolyOrderType::FAK => {
-            /*
-             * Polymarket market-order amount semantics:
-             *
-             * BUY  -> amount is USDC
-             * SELL -> amount is SHARES
-             *
-             * Therefore:
-             *
-             * BUY:
-             *     req.amount_usdc -> Amount::usdc(...)
-             *
-             * SELL:
-             *     req.size        -> Amount::shares(...)
-             */
-
             let amount = match side {
                 PolySide::Buy => {
                     let amount_usdc = match req.amount_usdc.as_deref() {

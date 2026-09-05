@@ -121,43 +121,8 @@ public class TradingDecisionService {
     }
 
     private void evaluateSell(ChainlinkSymbol symbol) {
-        Optional<PolymarketMarketSnapshot> snapshotOpt = marketDataProvider.currentSnapshot();
-        if (snapshotOpt.isEmpty()) return;
-        PolymarketMarketSnapshot snapshot = snapshotOpt.get();
-
-        Optional<Bet> openBetOpt = betService.getOpenBetFor(snapshot.slug());
-        if (openBetOpt.isEmpty()) return;
-        Bet openBet = openBetOpt.get();
-        MarketSide heldSide = openBet.side();
-
-        BigDecimal currentLivePrice = prices.getPrice(symbol);
-        BigDecimal currentTwapPrice = prices.getAvg60sPrice(symbol);
-        if (!isPriceValidForTrade(snapshot, currentLivePrice, currentTwapPrice, symbol)) return;
-
-        EvEstimate estimate = tradingEngine.estimatePricesToMeetEv(
-                currentLivePrice, currentTwapPrice,
-                snapshot.resolutionPrice(), (int) snapshot.secondsUntilClose());
-
-        double chance = heldSide == MarketSide.UP ? estimate.upChance() : estimate.downChance();
-        double minEv = tradingProperties.minimumExpectedEv();
-        double fee = tradingProperties.takerFee();
-        double targetSellPrice = (chance + minEv) / (1.0 - fee);
-        double currentPrice = currentLivePrice.doubleValue();
-
-        if (currentPrice >= targetSellPrice) {
-            try {
-                betService.sellPositionWithLimit(snapshot, heldSide, targetSellPrice, minEv, chance, symbol);
-                log.info("DECISION action=SOLD_LIMIT slug={} side={} price={} winChance={} ev={}",
-                        snapshot.slug(), heldSide, targetSellPrice, chance, minEv);
-            } catch (BetService.FokNotFilledException e) {
-                log.debug("DECISION action=FOK_NOT_FILLED_SELL slug={} side={} price={}",
-                        snapshot.slug(), heldSide, targetSellPrice);
-            } catch (Exception e) {
-                log.error("DECISION action=FOK_FAILED_SELL slug={} side={}", snapshot.slug(), heldSide, e);
-            }
-        } else {
-            log.debug("SELL skip: currentPrice {} < targetSellPrice {}", currentPrice, targetSellPrice);
-        }
+        marketDataProvider.currentSnapshot()
+                .ifPresent(snapshot -> betService.sellOpenPosition(snapshot, symbol));
     }
 
     private boolean isTimeToBetValid(PolymarketMarketSnapshot snapshot) {

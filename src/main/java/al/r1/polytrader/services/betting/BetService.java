@@ -61,10 +61,6 @@ public class BetService {
         return openSlugs.contains(slug);
     }
 
-    public Optional<Bet> getOpenBetFor(String marketSlug) {
-        return Optional.ofNullable(findOpenBetForSlug(marketSlug));
-    }
-
     public Bet placeBet(PolymarketMarketSnapshot snapshot, MarketSide side, Double maxBetPrice, double countedEv,
                         double countedWinChance, ChainlinkSymbol symbol) {
         if (snapshot == null) {
@@ -151,13 +147,21 @@ public class BetService {
                 throw new FokNotFilledException("FOK returned zero filled size");
             }
 
+            BigDecimal actualCostUsdc = response.makingAmount() != null && response.makingAmount().signum() > 0
+                    ? response.makingAmount() : amountUsdc;
+
+            double avgFillPrice = actualCostUsdc.doubleValue() / actualSize.doubleValue();
+            double realizedEv = tradingEngine.realizedBuyEv(countedWinChance, avgFillPrice);
+
             Instant placedAt = Instant.now();
             Bet bet = new Bet(clientBetId, response.orderId(), tokenId, slug, side, amountUsdc, tickSafePrice, actualSize,
-                    countedEv, countedWinChance, placedAt, snapshot.secondsUntilClose(), BetStatus.OPEN, null, null, null);
+                    realizedEv, countedWinChance, placedAt, snapshot.secondsUntilClose(), BetStatus.OPEN, null, null, null,
+                    actualCostUsdc);
             bets.put(clientBetId, bet);
 
-            log.info("BET_DECISION mode=REAL action=FILLED slug={} side={} | winChance={} evAtTradePrice={} | tradePrice={} amountUsdc={} filledShares={} | secondsLeft={}",
-                    slug, side, round(countedWinChance), round(countedEv), tickSafePrice, amountUsdc, actualSize, snapshot.secondsUntilClose());
+            log.info("BET_DECISION mode=REAL action=FILLED slug={} side={} | winChance={} requestedEv={} realizedEv={} avgFillPrice={} | priceLimit={} amountUsdc={} actualCostUsdc={} filledShares={} | secondsLeft={}",
+                    slug, side, round(countedWinChance), round(countedEv), round(realizedEv), round(avgFillPrice),
+                    tickSafePrice, amountUsdc, actualCostUsdc, actualSize, snapshot.secondsUntilClose());
 
             return bet;
         } catch (Exception e) {
@@ -169,29 +173,6 @@ public class BetService {
             }
             throw e;
         }
-    }
-
-    public void sellPositionWithLimit(PolymarketMarketSnapshot snapshot, MarketSide side, double price,
-                                      double ev, double winChance, ChainlinkSymbol symbol) throws FokNotFilledException {
-        String slug = snapshot.slug();
-        Bet bet = findOpenBetForSlug(slug);
-        if (bet == null) {
-            throw new IllegalStateException("No open bet found for market " + slug);
-        }
-        if (bet.side() != side) {
-            throw new IllegalStateException("Open bet side " + bet.side() + " does not match requested side " + side);
-        }
-        requireFreshPrice(slug, symbol);
-        if (price <= 0 || price >= 1) {
-            throw new IllegalStateException("Sell price out of bounds: " + price);
-        }
-
-        BigDecimal sellPrice = BigDecimal.valueOf(price).setScale(PRICE_SCALE, RoundingMode.UP);
-        if (sellPrice.signum() <= 0 || sellPrice.compareTo(BigDecimal.ONE) >= 0) {
-            throw new IllegalStateException("Invalid SELL price after rounding: " + sellPrice);
-        }
-
-        doExecuteSell(bet, sellPrice, winChance, ev);
     }
 
     public synchronized Optional<Bet> sellOpenPosition(PolymarketMarketSnapshot snapshot, ChainlinkSymbol symbol) {
@@ -231,19 +212,29 @@ public class BetService {
             return Optional.empty();
         }
 
-        double sellThreshold = tradingEngine.requiredEv(winChance);
-        double minSellPrice = tradingEngine.minSellPriceForEv(winChance, sellThreshold);
+        BigDecimal costBasis = bet.costUsdc() != null ? bet.costUsdc() : bet.amount();
+        double avgFillPrice = costBasis.doubleValue() / bet.size().doubleValue();
+
+        double keepEv = winChance / avgFillPrice - 1.0;
+        double requiredSellEv = keepEv * tradingProperties.sellEvMultiplier();
+        double targetNetValue = avgFillPrice * (1.0 + requiredSellEv);
+        double minSellPrice = tradingEngine.minSellPriceForNetValue(targetNetValue);
 
         BigDecimal currentBid = bet.side() == MarketSide.UP ? snapshot.upBid() : snapshot.downBid();
         double sellingEv = currentBid != null && currentBid.signum() > 0
-                ? tradingEngine.netSellValuePerShare(currentBid.doubleValue()) / winChance - 1.0
+                ? tradingEngine.netSellValuePerShare(currentBid.doubleValue()) / avgFillPrice - 1.0
                 : Double.NaN;
 
-        log.info("SELL_CHECK (REAL) slug={} betId={} side={} winChance={} minSellPrice={} threshold={} currentBid={} sellingEv={} btcLivePrice={} btcPriceToAchieve={} secondsLeft={}",
-                slug, bet.id(), bet.side(), round(winChance), round(minSellPrice), round(sellThreshold), currentBid, round(sellingEv), currentLivePrice, strike, snapshot.secondsUntilClose());
+        log.info("SELL_CHECK (REAL) slug={} betId={} side={} winChance={} avgFillPrice={} keepEv={} requiredSellEv={} minSellPrice={} currentBid={} sellingEv={} btcLivePrice={} btcPriceToAchieve={} secondsLeft={}",
+                slug, bet.id(), bet.side(), round(winChance), round(avgFillPrice), round(keepEv), round(requiredSellEv), round(minSellPrice), currentBid, round(sellingEv), currentLivePrice, strike, snapshot.secondsUntilClose());
+
+        if (currentBid == null || currentBid.doubleValue() < minSellPrice) {
+            log.debug("SELL_CHECK (REAL) slug={} betId={} -> hold (best bid {} below floor {})", slug, bet.id(), currentBid, round(minSellPrice));
+            return Optional.empty();
+        }
 
         try {
-            return Optional.of(executeSell(bet, minSellPrice, winChance, sellThreshold));
+            return Optional.of(executeSell(bet, minSellPrice, winChance, requiredSellEv));
         } catch (FokNotFilledException e) {
             log.info("REAL FOK SELL NOT FILLED: slug={} betId={} side={} price={} reason={}", slug, bet.id(), bet.side(), round(minSellPrice), e.getMessage());
             return Optional.empty();
@@ -252,8 +243,6 @@ public class BetService {
             return Optional.empty();
         }
     }
-
-    // --- Internal helpers ---
 
     private Bet findOpenBetForSlug(String slug) {
         for (Bet bet : bets.values()) {
@@ -267,11 +256,11 @@ public class BetService {
     private Bet doExecuteSell(Bet bet, BigDecimal sellPrice, double winChance, double evThreshold) {
         String slug = bet.marketSlug();
 
-        BigDecimal sellSize = bet.size().multiply(SELL_SAFETY_MARGIN).setScale(4, RoundingMode.DOWN);
+        BigDecimal sellSize = bet.size().multiply(SELL_SAFETY_MARGIN).setScale(2, RoundingMode.DOWN);
         if (sellSize.signum() <= 0) {
             throw new IllegalStateException("Position size " + bet.size() + " rounds down to zero sellable shares");
         }
-        assertMaxDecimals(sellSize, 4, "SELL sellSize");
+        assertMaxDecimals(sellSize, 2, "SELL sellSize");
 
         BigDecimal amountUsdc = sellSize.multiply(sellPrice).setScale(USDC_SCALE, RoundingMode.DOWN);
         assertMaxDecimals(amountUsdc, USDC_SCALE, "SELL amountUsdc");
@@ -304,17 +293,18 @@ public class BetService {
 
         BigDecimal actualSize = response.takingAmount() != null && response.takingAmount().signum() > 0 ? response.takingAmount() : sellSize;
         BigDecimal netProceeds = netSellProceeds(actualSize, sellPrice);
-        BigDecimal netProfitIfSold = netProceeds.subtract(bet.amount());
+        BigDecimal costBasis = bet.costUsdc() != null ? bet.costUsdc() : bet.amount();
+        BigDecimal netProfitIfSold = netProceeds.subtract(costBasis);
 
         Bet sold = new Bet(bet.id(), bet.orderId(), bet.tokenId(), slug, bet.side(), bet.amount(), bet.price(), bet.size(),
                 bet.countedEv(), bet.countedWinChance(), bet.placedAt(), bet.secondsUntilClose(), BetStatus.SOLD,
-                response.orderId(), sellPrice, netProfitIfSold);
+                response.orderId(), sellPrice, netProfitIfSold, bet.costUsdc());
 
         bets.put(bet.id(), sold);
         openSlugs.remove(slug);
 
-        log.info("BET_DECISION mode=REAL action=SOLD slug={} side={} | winChance={} threshold={} | boughtAt={} soldAt={} | sellSize={} profitLoss={}",
-                slug, bet.side(), round(winChance), round(evThreshold), bet.price(), sellPrice, actualSize, netProfitIfSold);
+        log.info("BET_DECISION mode=REAL action=SOLD slug={} side={} | winChance={} threshold={} | boughtAt={} soldAt={} | costBasis={} sellSize={} profitLoss={}",
+                slug, bet.side(), round(winChance), round(evThreshold), bet.price(), sellPrice, costBasis, actualSize, netProfitIfSold);
 
         return sold;
     }

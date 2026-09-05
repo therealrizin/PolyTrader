@@ -44,17 +44,6 @@ public class TradingEngine {
         return Math.clamp(maxPrice, 0.0, 1.0);
     }
 
-    public double minSellPriceForEv(double winChance, double targetEv) {
-        if (!Double.isFinite(winChance) || !Double.isFinite(targetEv) || winChance <= 0.0 || winChance > 1.0) {
-            return 1.0;
-        }
-        double minPrice = calculateMinSellPrice(winChance, targetEv);
-        if (!Double.isFinite(minPrice)) {
-            return 1.0;
-        }
-        return Math.clamp(minPrice, 0.0, 1.0);
-    }
-
     public double netSellValuePerShare(double sellPrice) {
         if (!Double.isFinite(sellPrice) || sellPrice <= 0.0 || sellPrice > 1.0) {
             return 0.0;
@@ -80,6 +69,36 @@ public class TradingEngine {
         return minEv * (1.0 - progress * 0.8);
     }
 
+    public double minSellPriceForNetValue(double targetNetValue) {
+        if (!Double.isFinite(targetNetValue) || targetNetValue <= 0.0) {
+            return 1.0;
+        }
+        double price = Math.clamp(targetNetValue, 0.0, 1.0);
+        for (int i = 0; i < 20; i++) {
+            double takerFee = takerFeeEstimate(price);
+            double newPrice = targetNetValue + takerFee;
+            if (!Double.isFinite(newPrice)) {
+                return 1.0;
+            }
+            newPrice = Math.clamp(newPrice, 0.0, 1.0);
+            if (Math.abs(newPrice - price) < 1e-10) {
+                return newPrice;
+            }
+            price = newPrice;
+        }
+        return price;
+    }
+
+    public double realizedBuyEv(double winChance, double price) {
+        if (!Double.isFinite(winChance) || winChance <= 0.0 || winChance > 1.0
+                || !Double.isFinite(price) || price <= 0.0 || price > 1.0) {
+            return 0.0;
+        }
+        double takerFee = takerFeeEstimate(price);
+        double ev = winChance * takerFee + winChance * (1.0 - takerFee) / price - 1.0;
+        return Double.isFinite(ev) ? ev : 0.0;
+    }
+
     private double calculateMaxBuyPrice(double winChance, double targetEv) {
         double price = winChance;
         for (int i = 0; i < 20; i++) {
@@ -91,24 +110,6 @@ public class TradingEngine {
             double newPrice = (1.0 - takerFee) / denominator;
             if (!Double.isFinite(newPrice)) {
                 return 0.0;
-            }
-            newPrice = Math.clamp(newPrice, 0.0, 1.0);
-            if (Math.abs(newPrice - price) < 1e-10) {
-                return newPrice;
-            }
-            price = newPrice;
-        }
-        return price;
-    }
-
-    private double calculateMinSellPrice(double winChance, double targetEv) {
-        double target = winChance * (1.0 - targetEv);
-        double price = target;
-        for (int i = 0; i < 20; i++) {
-            double takerFee = takerFeeEstimate(price);
-            double newPrice = target + takerFee;
-            if (!Double.isFinite(newPrice)) {
-                return 1.0;
             }
             newPrice = Math.clamp(newPrice, 0.0, 1.0);
             if (Math.abs(newPrice - price) < 1e-10) {

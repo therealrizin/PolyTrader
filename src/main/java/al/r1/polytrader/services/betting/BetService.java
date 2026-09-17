@@ -39,7 +39,7 @@ public class BetService {
     private static final int BUY_SIZE_SCALE = 2;
     private static final int USDC_SCALE = 2;
     private static final BigDecimal MIN_ORDER_USDC = new BigDecimal("1.00");
-    private static final double SELL_EV_FRACTION_OF_MINIMUM = 1.0 / 3.0;
+    private static final double SELL_EV_FRACTION_OF_MINIMUM = 2.0 / 3.0;
     private static final Duration SELL_ATTEMPT_MIN_INTERVAL = Duration.ofMillis(300);
     private static final BigDecimal MAX_ACCEPTABLE_PRICE_OVERSHOOT = new BigDecimal("0.05"); // 5 cents
     private static final int CIRCUIT_BREAKER_TRIP_THRESHOLD = 3; // consecutive breaches

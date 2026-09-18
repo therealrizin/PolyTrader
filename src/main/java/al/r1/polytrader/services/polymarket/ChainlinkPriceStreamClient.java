@@ -2,7 +2,6 @@ package al.r1.polytrader.services.polymarket;
 
 import al.r1.polytrader.config.polymarket.PolymarketProperties;
 import al.r1.polytrader.engine.ProbabilityTable;
-import al.r1.polytrader.services.TradingDecisionService;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
 import lombok.extern.slf4j.Slf4j;
@@ -43,7 +42,6 @@ public class ChainlinkPriceStreamClient {
     private final TaskScheduler taskScheduler;
     private final Prices prices;
     private final ProbabilityTable probabilityTable;
-    private final TradingDecisionService tradingDecisionService;
 
     private final PolymarketRollingWindow btcRollingWindow = new PolymarketRollingWindow();
     private final AtomicReference<WebSocketSession> currentSession = new AtomicReference<>();
@@ -53,13 +51,12 @@ public class ChainlinkPriceStreamClient {
     private volatile boolean running = false;
 
     public ChainlinkPriceStreamClient(PolymarketProperties properties, ObjectMapper objectMapper, TaskScheduler taskScheduler,
-                                      Prices prices, ProbabilityTable probabilityTable, TradingDecisionService tradingDecisionService) {
+                                      Prices prices, ProbabilityTable probabilityTable) {
         this.properties = properties;
         this.objectMapper = objectMapper;
         this.taskScheduler = taskScheduler;
         this.prices = prices;
         this.probabilityTable = probabilityTable;
-        this.tradingDecisionService = tradingDecisionService;
     }
 
     public synchronized void start() {
@@ -272,9 +269,6 @@ public class ChainlinkPriceStreamClient {
                 symbol.getWire(), price, Instant.ofEpochMilli(observedAtMillis), Instant.now(), prices.getPriceAgeMillis(symbol)
         );
 
-        if (symbol == ChainlinkSymbol.BTC_USD) {
-            tradingDecisionService.onChainlinkPriceUpdate(ChainlinkSymbol.BTC_USD);
-        }
     }
 
     private void handleTwapSixty(

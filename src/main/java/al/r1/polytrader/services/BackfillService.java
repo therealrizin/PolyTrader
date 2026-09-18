@@ -98,10 +98,14 @@ public class BackfillService {
 
         double[] closes = new double[n];
         long[] closeTimes = new long[n];
+        int[] ticks = new int[n];
         for (int i = 0; i < n; i++) {
             BinanceKline k = candles.get(i);
             closes[i] = k.close().doubleValue();
             closeTimes[i] = k.closeTime();
+            if (i > 0) {
+                ticks[i] = Double.compare(closes[i], closes[i - 1]);
+            }
         }
 
         double[] avg60 = new double[n];
@@ -120,16 +124,18 @@ public class BackfillService {
         log.info("Building probability table from {} validated candles...", n);
 
         for (int i = 0; i < n; i++) {
+            if (i < 3) continue;
             double currentAvg = avg60[i];
             long currentTime = closeTimes[i];
             int lowerBound = Math.max(0, i - 300);
-            probabilityTable.updateNumberOfChecks();
+            int trendLayer = ProbabilityTable.trendLayer(ticks[i - 2], ticks[i - 1], ticks[i]);
+            probabilityTable.updateNumberOfChecks(trendLayer);
 
             for (int y = i - 1; y >= lowerBound; y--) {
                 long elapsedSeconds = (currentTime - closeTimes[y]) / 1000;
                 if (elapsedSeconds < 1 || elapsedSeconds > 300) continue;
                 double changePure = currentAvg / avg60[y];
-                probabilityTable.updateProbabilitiesTable((int) elapsedSeconds, changePure, false);
+                probabilityTable.updateProbabilitiesTable((int) elapsedSeconds, changePure, false, trendLayer);
             }
         }
 

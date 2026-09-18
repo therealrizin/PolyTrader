@@ -1,6 +1,7 @@
 package al.r1.polytrader.services;
 
 import al.r1.polytrader.config.model.TradingProperties;
+import al.r1.polytrader.engine.ProbabilityTable;
 import al.r1.polytrader.engine.TradingEngine;
 import al.r1.polytrader.engine.model.EvEstimate;
 import al.r1.polytrader.engine.model.MarketSide;
@@ -14,8 +15,11 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.math.MathContext;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Optional;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,6 +41,8 @@ public class TradingDecisionService {
     private final AtomicBoolean tradingActive = new AtomicBoolean(false);
     private final AtomicReference<String> lastSkipKey = new AtomicReference<>();
     private final AtomicReference<Instant> lastSkipHeartbeatAt = new AtomicReference<>(Instant.EPOCH);
+    private final Deque<Integer> binanceTicks = new ArrayDeque<>(3);
+    private BigDecimal previousBinancePrice;
 
     public TradingDecisionService(Prices prices, TradingEngine tradingEngine,
                                   PolymarketDataProvider marketDataProvider,
@@ -60,13 +66,42 @@ public class TradingDecisionService {
         tradingActive.set(false);
     }
 
-    public void onChainlinkPriceUpdate(ChainlinkSymbol symbol) {
+    public synchronized void onBinancePriceUpdate(BigDecimal binancePrice) {
         if (!tradingActive.get()) return;
-        try { evaluateBuy(symbol); } catch (Exception e) { log.error("Error during BUY evaluation", e); }
+        if (binancePrice == null || binancePrice.signum() <= 0) return;
+
+        BigDecimal previousPrice = previousBinancePrice;
+        previousBinancePrice = binancePrice;
+        if (previousPrice == null || previousPrice.signum() <= 0) return;
+
+        int tick = binancePrice.compareTo(previousPrice);
+        binanceTicks.addLast(tick);
+        while (binanceTicks.size() > 3) binanceTicks.pollFirst();
+        if (binanceTicks.size() < 3) return;
+
+        ChainlinkSymbol symbol = ChainlinkSymbol.BTC_USD;
+        BigDecimal polymarketPrice = prices.getPrice(symbol);
+        BigDecimal polymarketTwap = prices.getAvg60sPrice(symbol);
+        if (polymarketPrice == null || polymarketTwap == null) return;
+
+        BigDecimal projectedPolymarketPrice = polymarketPrice.multiply(
+                binancePrice.divide(previousPrice, MathContext.DECIMAL64), MathContext.DECIMAL64);
+        int trendLayer = ProbabilityTable.trendLayer(
+                binanceTicks.peekFirst(),
+                binanceTicks.stream().skip(1).findFirst().orElse(0),
+                binanceTicks.peekLast());
+        if (!tradingEngine.hasProbabilityData(trendLayer)) {
+            logSkip("NO_TREND_PROBABILITY_DATA", null, "trendLayer=" + trendLayer);
+            return;
+        }
+
+        try { evaluateBuy(symbol, projectedPolymarketPrice, polymarketTwap, trendLayer); }
+        catch (Exception e) { log.error("Error during BUY evaluation", e); }
         try { evaluateSell(symbol); } catch (Exception e) { log.error("Error during SELL evaluation", e); }
     }
 
-    private void evaluateBuy(ChainlinkSymbol symbol) {
+    private void evaluateBuy(ChainlinkSymbol symbol, BigDecimal projectedLivePrice,
+                             BigDecimal currentTwapPrice, int trendLayer) {
         Optional<PolymarketMarketSnapshot> snapshotOpt = marketDataProvider.currentSnapshot();
         if (snapshotOpt.isEmpty()) {
             logSkip("NO_SNAPSHOT", null, "no open Polymarket market snapshot yet");
@@ -77,12 +112,11 @@ public class TradingDecisionService {
         if (!isTimeToBetValid(snapshot)) return;
 
         BigDecimal currentLivePrice = prices.getPrice(symbol);
-        BigDecimal currentTwapPrice = prices.getAvg60sPrice(symbol);
         if (!isPriceValidForTrade(snapshot, currentLivePrice, currentTwapPrice, symbol)) return;
 
         EvEstimate estimate = tradingEngine.estimatePricesToMeetEv(
-                currentLivePrice, currentTwapPrice,
-                snapshot.resolutionPrice(), (int) snapshot.secondsUntilClose());
+                projectedLivePrice, currentTwapPrice,
+                snapshot.resolutionPrice(), (int) snapshot.secondsUntilClose(), trendLayer);
 
         log.info("BUY EVALUATION:\n" +
                         "downChance={}\ndownEvRequired={}\ndownPriceToMeetEv={}\n" +
@@ -90,12 +124,12 @@ public class TradingDecisionService {
                 estimate.downChance(), estimate.downEvRequired(), estimate.downPriceToMeetEv(),
                 estimate.upChance(), estimate.upEvRequired(), estimate.upPriceToMeetEv());
 
-        boolean betUp = placeBet(snapshot, estimate, MarketSide.UP, symbol);
-        if (!betUp) placeBet(snapshot, estimate, MarketSide.DOWN, symbol);
+        boolean betUp = placeBet(snapshot, estimate, MarketSide.UP, symbol, projectedLivePrice);
+        if (!betUp) placeBet(snapshot, estimate, MarketSide.DOWN, symbol, projectedLivePrice);
     }
 
     private boolean placeBet(PolymarketMarketSnapshot snapshot, EvEstimate estimate,
-                             MarketSide side, ChainlinkSymbol symbol) {
+                             MarketSide side, ChainlinkSymbol symbol, BigDecimal projectedLivePrice) {
         double chance = side == MarketSide.UP ? estimate.upChance() : estimate.downChance();
         double betPrice = side == MarketSide.UP ? estimate.upPriceToMeetEv() : estimate.downPriceToMeetEv();
         double ev = side == MarketSide.UP ? estimate.upEvRequired() : estimate.downEvRequired();
@@ -106,7 +140,7 @@ public class TradingDecisionService {
 
         log.info("BET_DECISION:\nslug={}\nside={}\nwinChance={}\nevAtCurrentPrice={}\nbetPrice={}\nlivePrice={}\ntwapPrice={}\npriceToAchieve={}",
                 snapshot.slug(), side, chance, ev, betPrice,
-                prices.getPrice(symbol), prices.getAvg60sPrice(symbol), snapshot.resolutionPrice());
+                projectedLivePrice, prices.getAvg60sPrice(symbol), snapshot.resolutionPrice());
 
         try {
             betService.placeBet(snapshot, side, betPrice, ev, chance, symbol);

@@ -23,8 +23,13 @@ public class TradingEngine {
     }
 
     public EvEstimate estimatePricesToMeetEv(BigDecimal currentLivePrice, BigDecimal currentTwapPrice, BigDecimal resolutionPrice, int secondsLeft) {
+        return estimatePricesToMeetEv(currentLivePrice, currentTwapPrice, resolutionPrice, secondsLeft, ProbabilityTable.NEUTRAL_TREND);
+    }
+
+    public EvEstimate estimatePricesToMeetEv(BigDecimal currentLivePrice, BigDecimal currentTwapPrice,
+                                             BigDecimal resolutionPrice, int secondsLeft, int trendLayer) {
         int safeSecondsLeft = Math.clamp(secondsLeft, 0, MAX_MARKET_SECONDS);
-        double upChance = estimatedUpChance(currentLivePrice, currentTwapPrice, resolutionPrice, safeSecondsLeft);
+        double upChance = estimatedUpChance(currentLivePrice, currentTwapPrice, resolutionPrice, safeSecondsLeft, trendLayer);
         double downChance = 1.0 - upChance;
         double upEvRequired = requiredEv(upChance);
         double downEvRequired = requiredEv(downChance);
@@ -42,6 +47,10 @@ public class TradingEngine {
             return 0.0;
         }
         return Math.clamp(maxPrice, 0.0, 1.0);
+    }
+
+    public boolean hasProbabilityData(int trendLayer) {
+        return table.getNumberOfChecksWithWeight(trendLayer) > 0.0;
     }
 
     public double netSellValuePerShare(double sellPrice) {
@@ -129,7 +138,8 @@ public class TradingEngine {
         return feeCoefficient * price * (1.0 - price);
     }
 
-    private double estimatedUpChance(BigDecimal currentLivePrice, BigDecimal currentTwapPrice, BigDecimal referencePrice, int secondsLeft) {
+    private double estimatedUpChance(BigDecimal currentLivePrice, BigDecimal currentTwapPrice,
+                                     BigDecimal referencePrice, int secondsLeft, int trendLayer) {
         if (currentLivePrice == null
                 || currentTwapPrice == null
                 || referencePrice == null
@@ -143,7 +153,7 @@ public class TradingEngine {
 
         if (secondsLeft >= TWAP_WINDOW_SECONDS) {
             double requiredPctChange = percentageChange(currentLivePrice, referencePrice);
-            return probabilityForChange(requiredPctChange, secondsLeft);
+            return probabilityForChange(requiredPctChange, secondsLeft, trendLayer);
         }
 
         double futureWeight = (double) secondsLeft / TWAP_WINDOW_SECONDS;
@@ -158,15 +168,15 @@ public class TradingEngine {
         double currentLive = currentLivePrice.doubleValue();
         double requiredPctChange = (requiredFutureLivePrice - currentLive) / currentLive * 100.0;
 
-        return probabilityForChange(requiredPctChange, secondsLeft);
+        return probabilityForChange(requiredPctChange, secondsLeft, trendLayer);
     }
 
-    private double probabilityForChange(double requiredPctChange, int secondsLeft) {
+    private double probabilityForChange(double requiredPctChange, int secondsLeft, int trendLayer) {
         if (requiredPctChange < 0.0) {
-            double probability = table.getChance(secondsLeft, Math.abs(requiredPctChange));
+            double probability = table.getChance(secondsLeft, Math.abs(requiredPctChange), trendLayer);
             return clampProbability(1.0 - probability);
         }
-        double probability = table.getChance(secondsLeft, requiredPctChange);
+        double probability = table.getChance(secondsLeft, requiredPctChange, trendLayer);
         return clampProbability(probability);
     }
 

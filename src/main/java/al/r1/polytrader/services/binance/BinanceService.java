@@ -106,10 +106,10 @@ public class BinanceService {
                     latestPrice.put(usdPair, price);
 
                     if (usdPair == CurrencyPairs.BTCUSD) {
-                        prices.setBinancePrice(price);
+                        prices.setBinancePrice(price, event.T());
                         tickAggregators.getBinance().record(price);
                         btcRollingWindow.record(event.T(), price, probabilityTable)
-                                .ifPresent(tradingDecisionService::onBinancePriceUpdate);
+                                .ifPresent(completedClose -> tradingDecisionService.onBinancePriceUpdate(completedClose, event.T()));
                     }
 
                     lastMessageAtMillis.put(symbol, System.currentTimeMillis());

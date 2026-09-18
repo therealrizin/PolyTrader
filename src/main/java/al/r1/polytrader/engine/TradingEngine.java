@@ -3,6 +3,7 @@ package al.r1.polytrader.engine;
 import al.r1.polytrader.config.model.TradingProperties;
 import al.r1.polytrader.engine.model.EvEstimate;
 import al.r1.polytrader.engine.model.MarketSide;
+import al.r1.polytrader.services.RuntimeTradingSettings;
 import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
@@ -16,10 +17,12 @@ public class TradingEngine {
 
     private final ProbabilityTable table;
     private final TradingProperties tradingProperties;
+    private final RuntimeTradingSettings runtimeSettings;
 
-    public TradingEngine(ProbabilityTable table, TradingProperties tradingProperties) {
+    public TradingEngine(ProbabilityTable table, TradingProperties tradingProperties, RuntimeTradingSettings runtimeSettings) {
         this.table = table;
         this.tradingProperties = tradingProperties;
+        this.runtimeSettings = runtimeSettings;
     }
 
     public EvEstimate estimatePricesToMeetEv(BigDecimal currentLivePrice, BigDecimal currentTwapPrice, BigDecimal resolutionPrice, int secondsLeft) {
@@ -53,6 +56,10 @@ public class TradingEngine {
         return table.getNumberOfChecksWithWeight(trendLayer) > 0.0;
     }
 
+    public int getTrendSampleCount(int trendLayer) {
+        return table.getNumberOfChecks(trendLayer);
+    }
+
     public double netSellValuePerShare(double sellPrice) {
         if (!Double.isFinite(sellPrice) || sellPrice <= 0.0 || sellPrice > 1.0) {
             return 0.0;
@@ -65,8 +72,9 @@ public class TradingEngine {
     }
 
     public double requiredEv(double winChance) {
-        double minEv = tradingProperties.minimumExpectedEv();
-        double minWinChance = tradingProperties.minimumWinChance();
+        RuntimeTradingSettings.Settings settings = runtimeSettings.get();
+        double minEv = settings.minimumExpectedEv();
+        double minWinChance = settings.minimumWinChance();
 
         if (winChance <= minWinChance) {
             return minEv;

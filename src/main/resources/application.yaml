@@ -43,8 +43,8 @@ trading:
   minimum-seconds-since-open: ${TRADING_MINIMUM_SECONDS_SINCE_OPEN:10}
   minimum-trend-samples: ${TRADING_MINIMUM_TREND_SAMPLES:25}
   minimum-calibration-samples: ${TRADING_MINIMUM_CALIBRATION_SAMPLES:30}
-  maximum-cross-venue-skew-millis: ${TRADING_MAXIMUM_CROSS_VENUE_SKEW_MILLIS:1000}
-  minimum-executable-edge: ${TRADING_MINIMUM_EXECUTABLE_EDGE:0.01}
+  maximum-cross-venue-skew-millis: ${TRADING_MAXIMUM_CROSS_VENUE_SKEW_MILLIS:1500}
+  minimum-executable-edge: ${TRADING_MINIMUM_EXECUTABLE_EDGE:0.00}
   maximum-book-spread: ${TRADING_MAXIMUM_BOOK_SPREAD:0.10}
   # Required for PATCH /api/v1/trading/settings. Keep distinct from execution credentials.
   admin-token: ${TRADING_ADMIN_TOKEN:test}

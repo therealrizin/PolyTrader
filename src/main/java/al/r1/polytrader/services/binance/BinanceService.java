@@ -1,9 +1,12 @@
 package al.r1.polytrader.services.binance;
 
 import al.r1.polytrader.config.binance.BinanceProperties;
+import al.r1.polytrader.engine.ProbabilityTable;
+import al.r1.polytrader.services.BinanceRollingWindow;
 import al.r1.polytrader.services.model.CurrencyPairs;
 import al.r1.polytrader.services.model.PriceTickAggregators;
 import al.r1.polytrader.services.model.Prices;
+import al.r1.polytrader.services.TradingDecisionService;
 import al.r1.polytrader.services.binance.model.BinanceKline;
 import al.r1.polytrader.services.binance.model.BinanceTradeEvent;
 import jakarta.annotation.PostConstruct;
@@ -44,6 +47,8 @@ public class BinanceService {
     private final TaskScheduler liveDataTaskScheduler;
     private final Prices prices;
     private final PriceTickAggregators tickAggregators;
+    private final TradingDecisionService tradingDecisionService;
+    private final ProbabilityTable probabilityTable;
     private final BinanceProperties binanceProperties;
 
     @Getter
@@ -52,17 +57,22 @@ public class BinanceService {
     private final Map<CurrencyPairs, Long> lastMessageAtMillis = new ConcurrentHashMap<>();
     private final Map<CurrencyPairs, AtomicReference<WebSocketSession>> sessions = new ConcurrentHashMap<>();
     private final Map<CurrencyPairs, WebSocketClient> clients = new ConcurrentHashMap<>();
+    private final BinanceRollingWindow btcRollingWindow = new BinanceRollingWindow();
 
     public BinanceService(@Qualifier("binanceWebClient") WebClient webClient, ObjectMapper objectMapper,
                           TaskScheduler liveDataTaskScheduler,
                           Prices prices,
                           PriceTickAggregators tickAggregators,
+                          TradingDecisionService tradingDecisionService,
+                          ProbabilityTable probabilityTable,
                           BinanceProperties binanceProperties) {
         this.webClient = webClient;
         this.objectMapper = objectMapper;
         this.liveDataTaskScheduler = liveDataTaskScheduler;
         this.prices = prices;
         this.tickAggregators = tickAggregators;
+        this.tradingDecisionService = tradingDecisionService;
+        this.probabilityTable = probabilityTable;
         this.binanceProperties = binanceProperties;
     }
 
@@ -96,8 +106,10 @@ public class BinanceService {
                     latestPrice.put(usdPair, price);
 
                     if (usdPair == CurrencyPairs.BTCUSD) {
-                        prices.setBinancePrice(price);
+                        prices.setBinancePrice(price, event.T());
                         tickAggregators.getBinance().record(price);
+                        btcRollingWindow.record(event.T(), price, probabilityTable)
+                                .ifPresent(completedClose -> tradingDecisionService.onBinancePriceUpdate(completedClose, event.T()));
                     }
 
                     lastMessageAtMillis.put(symbol, System.currentTimeMillis());

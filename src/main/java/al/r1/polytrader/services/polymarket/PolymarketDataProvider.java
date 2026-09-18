@@ -167,7 +167,9 @@ public class PolymarketDataProvider {
         BigDecimal downAsk = downBestAsk.get();
         BigDecimal upBid = upBestBid.get();
         BigDecimal downBid = downBestBid.get();
-        if (strikePriceUsd == null || upAsk == null || downAsk == null) return;
+        // The strike and timing are sufficient to price the outcome. Book prices are optional:
+        // execution may submit a bounded FOK even before a BBO update arrives.
+        if (strikePriceUsd == null) return;
         latestSnapshot.set(new PolymarketMarketSnapshot(slug, upAsk, downAsk, upBid, downBid,
                 secondsUntilClose, strikePriceUsd, secondsSinceOpen));
         log.debug("SNAPSHOT UPDATED slug={} UP[bid={},ask={}] DOWN[bid={},ask={}] secondsLeft={} priceToBeat={}",

@@ -48,7 +48,7 @@ public class Prices {
     }
 
     private final Map<ChainlinkSymbol, SymbolState> states = new EnumMap<>(ChainlinkSymbol.class);
-    private final Map<PriceProviders, BigDecimal> providerPrices = new EnumMap<>(PriceProviders.class);
+    private final Map<PriceProviders, ProviderPrice> providerPrices = new EnumMap<>(PriceProviders.class);
 
     public Prices() {
         for (ChainlinkSymbol symbol : ChainlinkSymbol.values()) {
@@ -149,12 +149,22 @@ public class Prices {
         return new ArrayList<>(state.history());
     }
 
-    public void setProviderPrice(PriceProviders provider, BigDecimal price) {
+    public record ProviderPrice(BigDecimal price, long observedAtMillis) {}
+
+    public synchronized void setProviderPrice(PriceProviders provider, BigDecimal price, long observedAtMillis) {
         if (provider == null || price == null) return;
-        providerPrices.put(provider, price);
+        providerPrices.put(provider, new ProviderPrice(price, observedAtMillis > 0 ? observedAtMillis : System.currentTimeMillis()));
     }
 
     public void setBinancePrice(BigDecimal price) {
-        setProviderPrice(PriceProviders.BINANCE, price);
+        setProviderPrice(PriceProviders.BINANCE, price, System.currentTimeMillis());
+    }
+
+    public void setBinancePrice(BigDecimal price, long observedAtMillis) {
+        setProviderPrice(PriceProviders.BINANCE, price, observedAtMillis);
+    }
+
+    public synchronized ProviderPrice getProviderPrice(PriceProviders provider) {
+        return providerPrices.get(provider);
     }
 }

@@ -1,6 +1,5 @@
 package al.r1.polytrader.engine;
 
-import lombok.Getter;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -10,26 +9,30 @@ public class ProbabilityTable {
     private static final int BUCKET_RANGE = 500;
     private static final int CENTER = BUCKET_RANGE;
     private static final int BUCKET_COUNT = 2 * BUCKET_RANGE + 1;
+    public static final int TREND_LAYER_COUNT = 27;
+    public static final int NEUTRAL_TREND = 13;
 
-    @Getter
-    private double[][] probabilitiesTable;
+    private double[][][] probabilitiesTable;
 
-    @Getter
-    private int numberOfChecks;
+    private int[] numberOfChecks;
 
-    @Getter
-    private double numberOfChecksWithWeight;
+    private double[] numberOfChecksWithWeight;
 
-    private double weight;
+    private double[] weights;
 
     public ProbabilityTable() {
         reset();
     }
 
     public synchronized double getChance(double seconds, double changePercent) {
+        return getChance(seconds, changePercent, NEUTRAL_TREND);
+    }
+
+    public synchronized double getChance(double seconds, double changePercent, int trendLayer) {
         int time = (int) Math.round(seconds);
 
-        if (time < 1 || time > 300 || Double.isNaN(changePercent) || Double.isInfinite(changePercent)) {
+        if (time < 1 || time > 300 || !isValidTrendLayer(trendLayer)
+                || Double.isNaN(changePercent) || Double.isInfinite(changePercent)) {
             return 0.0;
         }
 
@@ -38,11 +41,11 @@ public class ProbabilityTable {
         }
 
         int bucket = mapPercentToBucket(changePercent);
-        double weightedCount = probabilitiesTable[time][bucket];
-        if (numberOfChecksWithWeight <= 0.0) {
+        double weightedCount = probabilitiesTable[trendLayer][time][bucket];
+        if (numberOfChecksWithWeight[trendLayer] <= 0.0) {
             return 0.0;
         }
-        double probability = weightedCount / numberOfChecksWithWeight;
+        double probability = weightedCount / numberOfChecksWithWeight[trendLayer];
         return Math.clamp(probability, 0.0, 1.0);
     }
 
@@ -51,11 +54,20 @@ public class ProbabilityTable {
             double changePure,
             boolean newRecord
     ) {
+        updateProbabilitiesTable(time, changePure, newRecord, NEUTRAL_TREND);
+    }
+
+    public synchronized void updateProbabilitiesTable(
+            int time,
+            double changePure,
+            boolean newRecord,
+            int trendLayer
+    ) {
         if (time < 1 || time > 300) {
             return;
         }
 
-        if (Double.isNaN(changePure) || Double.isInfinite(changePure) || changePure <= 0.0) {
+        if (!isValidTrendLayer(trendLayer) || Double.isNaN(changePure) || Double.isInfinite(changePure) || changePure <= 0.0) {
             return;
         }
 
@@ -63,29 +75,71 @@ public class ProbabilityTable {
 
         if (changeArea > CENTER) {
             for (int i = CENTER + 1; i <= changeArea; i++) {
-                probabilitiesTable[time][i] += weight;
+                probabilitiesTable[trendLayer][time][i] += weights[trendLayer];
             }
         } else if (changeArea < CENTER) {
             for (int i = CENTER - 1; i >= changeArea; i--) {
-                probabilitiesTable[time][i] += weight;
+                probabilitiesTable[trendLayer][time][i] += weights[trendLayer];
             }
         } else {
-            probabilitiesTable[time][CENTER] += weight;
+            probabilitiesTable[trendLayer][time][CENTER] += weights[trendLayer];
         }
 
         if (newRecord) {
-            updateNumberOfChecks();
+            updateNumberOfChecks(trendLayer);
         }
     }
 
     public synchronized void updateNumberOfChecks() {
-        this.weight = Math.max(
-                (double) numberOfChecks / 1_000_000.0,
+        updateNumberOfChecks(NEUTRAL_TREND);
+    }
+
+    public synchronized void updateNumberOfChecks(int trendLayer) {
+        if (!isValidTrendLayer(trendLayer)) {
+            return;
+        }
+        weights[trendLayer] = Math.max(
+                (double) numberOfChecks[trendLayer] / 1_000_000.0,
                 1.0
         );
 
-        this.numberOfChecksWithWeight += weight;
-        this.numberOfChecks++;
+        this.numberOfChecksWithWeight[trendLayer] += weights[trendLayer];
+        this.numberOfChecks[trendLayer]++;
+    }
+
+    public int getNumberOfChecks() {
+        int total = 0;
+        for (int checks : numberOfChecks) total += checks;
+        return total;
+    }
+
+    public int getNumberOfChecks(int trendLayer) {
+        return isValidTrendLayer(trendLayer) ? numberOfChecks[trendLayer] : 0;
+    }
+
+    public double getNumberOfChecksWithWeight() {
+        double total = 0.0;
+        for (double checksWithWeight : numberOfChecksWithWeight) total += checksWithWeight;
+        return total;
+    }
+
+    public double getNumberOfChecksWithWeight(int trendLayer) {
+        return isValidTrendLayer(trendLayer) ? numberOfChecksWithWeight[trendLayer] : 0.0;
+    }
+
+    public double[][] getProbabilitiesTable() {
+        return getProbabilitiesTable(NEUTRAL_TREND);
+    }
+
+    public double[][] getProbabilitiesTable(int trendLayer) {
+        return isValidTrendLayer(trendLayer) ? probabilitiesTable[trendLayer] : new double[SECONDS_DIM][BUCKET_COUNT];
+    }
+
+    public static int trendLayer(int oldestTick, int middleTick, int newestTick) {
+        if (!isTick(oldestTick) || !isTick(middleTick) || !isTick(newestTick)) {
+            return NEUTRAL_TREND;
+        }
+        return (oldestTick + 1) * 9 + (middleTick + 1) * 3 + newestTick + 1;
     }
 
     public int mapChangeArea(double changePure) {
@@ -116,9 +170,18 @@ public class ProbabilityTable {
 
     public synchronized void reset() {
         this.probabilitiesTable =
-                new double[SECONDS_DIM][BUCKET_COUNT];
-        this.numberOfChecks = 0;
-        this.numberOfChecksWithWeight = 0.0;
-        this.weight = 1.0;
+                new double[TREND_LAYER_COUNT][SECONDS_DIM][BUCKET_COUNT];
+        this.numberOfChecks = new int[TREND_LAYER_COUNT];
+        this.numberOfChecksWithWeight = new double[TREND_LAYER_COUNT];
+        this.weights = new double[TREND_LAYER_COUNT];
+        java.util.Arrays.fill(this.weights, 1.0);
+    }
+
+    private static boolean isTick(int tick) {
+        return tick >= -1 && tick <= 1;
+    }
+
+    private static boolean isValidTrendLayer(int trendLayer) {
+        return trendLayer >= 0 && trendLayer < TREND_LAYER_COUNT;
     }
 }

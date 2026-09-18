@@ -12,5 +12,11 @@ public record TradingProperties(
         double takerFee,
         BigDecimal betAmount,
         int minimumSecondsSinceOpen,
-        double sellEvMultiplier
+        double sellEvMultiplier,
+        int minimumTrendSamples,
+        int minimumCalibrationSamples,
+        long maximumCrossVenueSkewMillis,
+        double minimumExecutableEdge,
+        double maximumBookSpread,
+        String adminToken
 ) {}

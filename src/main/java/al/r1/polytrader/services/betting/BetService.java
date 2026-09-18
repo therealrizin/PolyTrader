@@ -9,6 +9,7 @@ import al.r1.polytrader.services.betting.model.ExecutionOrderResponse;
 import al.r1.polytrader.services.betting.model.Bet;
 import al.r1.polytrader.services.model.ChainlinkSymbol;
 import al.r1.polytrader.services.model.Prices;
+import al.r1.polytrader.services.RuntimeTradingSettings;
 import al.r1.polytrader.services.polymarket.PolymarketMarketResolver;
 import al.r1.polytrader.services.polymarket.model.PolymarketMarketSnapshot;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -52,6 +53,7 @@ public class BetService {
     private final WebClient executionWebClient;
     private final Prices prices;
     private final TradingEngine tradingEngine;
+    private final RuntimeTradingSettings runtimeSettings;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Set<String> openSlugs = ConcurrentHashMap.newKeySet();
@@ -59,12 +61,14 @@ public class BetService {
     private final Map<String, Instant> lastSellAttemptAt = new ConcurrentHashMap<>();
 
     public BetService(TradingProperties tradingProperties, PolymarketMarketResolver marketResolver,
-                      @Qualifier("executionWebClient") WebClient executionWebClient, Prices prices, TradingEngine tradingEngine) {
+                      @Qualifier("executionWebClient") WebClient executionWebClient, Prices prices, TradingEngine tradingEngine,
+                      RuntimeTradingSettings runtimeSettings) {
         this.tradingProperties = tradingProperties;
         this.marketResolver = marketResolver;
         this.executionWebClient = executionWebClient;
         this.prices = prices;
         this.tradingEngine = tradingEngine;
+        this.runtimeSettings = runtimeSettings;
     }
 
     public boolean hasOpenBetFor(String slug) {
@@ -258,7 +262,7 @@ public class BetService {
 
         BigDecimal costBasis = bet.costUsdc() != null ? bet.costUsdc() : bet.amount();
         double avgFillPrice = costBasis.doubleValue() / bet.size().doubleValue();
-        double requiredSellEv = tradingProperties.minimumExpectedEv() * SELL_EV_FRACTION_OF_MINIMUM;
+        double requiredSellEv = runtimeSettings.get().minimumExpectedEv() * SELL_EV_FRACTION_OF_MINIMUM;
         double targetNetValue = avgFillPrice * (1.0 + requiredSellEv);
         double minSellPrice = tradingEngine.minSellPriceForNetValue(targetNetValue);
 

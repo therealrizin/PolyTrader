@@ -31,15 +31,23 @@ public class DataControllerV1 {
 
     @GetMapping("/table")
     public ProbabilityTableResponse getTable(
-            @RequestParam(defaultValue = "1") int seconds
+            @RequestParam(defaultValue = "1") int seconds,
+            @RequestParam(defaultValue = "0") int oldestTick,
+            @RequestParam(defaultValue = "0") int middleTick,
+            @RequestParam(defaultValue = "0") int newestTick
     ) {
         if (seconds < 1 || seconds > MAX_SECONDS) {
             throw new IllegalArgumentException(
                     "seconds must be between 1 and " + MAX_SECONDS);
         }
 
-        double[][] table = probabilityTable.getProbabilitiesTable();
-        double totalWeight = probabilityTable.getNumberOfChecksWithWeight();
+        if (!isTick(oldestTick) || !isTick(middleTick) || !isTick(newestTick)) {
+            throw new IllegalArgumentException("ticks must be -1, 0, or 1");
+        }
+
+        int trendLayer = ProbabilityTable.trendLayer(oldestTick, middleTick, newestTick);
+        double[][] table = probabilityTable.getProbabilitiesTable(trendLayer);
+        double totalWeight = probabilityTable.getNumberOfChecksWithWeight(trendLayer);
 
         List<ProbabilityBucket> buckets = new ArrayList<>();
         for (int b = 0; b < table[seconds].length; b++) {
@@ -76,5 +84,9 @@ public class DataControllerV1 {
         if (b == 1000) return "+0.500% or more";
         double pct = (b - CENTER) * 0.001;
         return String.format("%+.3f%%", pct);
+    }
+
+    private boolean isTick(int tick) {
+        return tick >= -1 && tick <= 1;
     }
 }
